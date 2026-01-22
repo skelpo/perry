@@ -766,4 +766,4 @@ Contributions are welcome! Please read the [CLAUDE.md](CLAUDE.md) file for devel
 
 ## License
 
-[License information here]
+MIT License - see [LICENSE](LICENSE) for details.

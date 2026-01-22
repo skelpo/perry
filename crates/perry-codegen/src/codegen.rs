@@ -653,10 +653,31 @@ impl Compiler {
             if let Some(ctor) = &class.constructor {
                 self.collect_closures_from_stmts_into(&ctor.body, &mut all_closures, Some(class_name));
             }
+
+            // Collect from class field initializers
+            for field in &class.fields {
+                if let Some(init) = &field.init {
+                    self.collect_closures_from_expr(init, &mut all_closures, Some(class_name));
+                }
+            }
+
+            // Collect from static field initializers (no enclosing class for static context)
+            for field in &class.static_fields {
+                if let Some(init) = &field.init {
+                    self.collect_closures_from_expr(init, &mut all_closures, None);
+                }
+            }
         }
 
         // Collect from init statements (no enclosing class)
         self.collect_closures_from_stmts_into(&hir.init, &mut all_closures, None);
+
+        // Collect from global variable initializers
+        for global in &hir.globals {
+            if let Some(init) = &global.init {
+                self.collect_closures_from_expr(init, &mut all_closures, None);
+            }
+        }
 
         // Deduplicate closures by func_id (same closure may appear in class method and init statements)
         // Prefer entries with enclosing_class set (from class methods) over those without
@@ -7921,6 +7942,10 @@ impl Compiler {
             Stmt::Switch { discriminant, cases } => {
                 self.collect_closures_from_expr(discriminant, closures, enclosing_class);
                 for case in cases {
+                    // Collect from case test expression (closures may appear in case tests)
+                    if let Some(test) = &case.test {
+                        self.collect_closures_from_expr(test, closures, enclosing_class);
+                    }
                     for s in &case.body {
                         self.collect_closures_from_stmt(s, closures, enclosing_class);
                     }
