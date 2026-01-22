@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-01-18T19:39:20Z",
+  "summary": {
+    "parity_pass": 37,
+    "parity_fail": 1,
+    "compile_fail": 5,
+    "node_fail": 0,
+    "skipped": 16,
+    "total_run": 38,
+    "parity_percentage": 97.3
+  },
+  "failures": {
+    "parity": ["test_cli_simulation"]
+,
+    "compile": ["test_exponent","test_for_in","test_for","test_generic_class","test_generic_func"]
+
+  }
+}

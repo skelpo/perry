@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-01-15T10:00:27Z",
+  "summary": {
+    "parity_pass": 37,
+    "parity_fail": 6,
+    "compile_fail": 0,
+    "node_fail": 6,
+    "skipped": 10,
+    "total_run": 43,
+    "parity_percentage": 86.0
+  },
+  "failures": {
+    "parity": ["test_cli_simulation","test_data_pipeline","test_generic_class","test_optional_chain","test_static","test_string_slice"]
+,
+    "compile": [""]
+
+  }
+}

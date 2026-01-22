@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-01-18T18:48:16Z",
+  "summary": {
+    "parity_pass": 33,
+    "parity_fail": 1,
+    "compile_fail": 9,
+    "node_fail": 0,
+    "skipped": 16,
+    "total_run": 34,
+    "parity_percentage": 97.0
+  },
+  "failures": {
+    "parity": ["test_cli_simulation"]
+,
+    "compile": ["test_spread","test_static","test_string_methods","test_string_slice","test_string_split","test_substring","test_try_catch","test_type_guards","test_union_types"]
+
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-01-17T21:34:24Z",
+  "summary": {
+    "parity_pass": 26,
+    "parity_fail": 4,
+    "compile_fail": 13,
+    "node_fail": 0,
+    "skipped": 16,
+    "total_run": 30,
+    "parity_percentage": 86.6
+  },
+  "failures": {
+    "parity": ["test_bitwise","test_for_in","test_inheritance","test_simple_class"]
+,
+    "compile": ["test_cli_simulation","test_closure_complex","test_data_pipeline","test_generic_class","test_getters_setters","test_method_inherit","test_method_override","test_mixed_arrays","test_mutable_capture","test_private_fields","test_regex","test_returning_closures","test_splice"]
+
+  }
+}

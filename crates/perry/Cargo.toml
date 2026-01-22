@@ -1,0 +1,31 @@
+[package]
+name = "perry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native TypeScript compiler - CLI driver"
+
+[[bin]]
+name = "perry"
+path = "src/main.rs"
+
+[dependencies]
+perry-parser.workspace = true
+perry-types.workspace = true
+perry-hir.workspace = true
+perry-transform.workspace = true
+perry-codegen.workspace = true
+perry-runtime.workspace = true
+perry-diagnostics.workspace = true
+
+clap.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+indicatif.workspace = true
+console.workspace = true
+toml.workspace = true
+walkdir.workspace = true
+atty.workspace = true

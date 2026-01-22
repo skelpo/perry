@@ -1,0 +1,16 @@
+[package]
+name = "perry-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TypeScript parser wrapper using SWC"
+
+[dependencies]
+swc_ecma_parser.workspace = true
+swc_ecma_ast.workspace = true
+swc_common.workspace = true
+
+thiserror.workspace = true
+anyhow.workspace = true
+
+perry-diagnostics.workspace = true

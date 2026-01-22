@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-01-19T05:25:08Z",
+  "summary": {
+    "parity_pass": 36,
+    "parity_fail": 3,
+    "compile_fail": 4,
+    "node_fail": 0,
+    "skipped": 16,
+    "total_run": 39,
+    "parity_percentage": 92.3
+  },
+  "failures": {
+    "parity": ["test_cli_simulation","test_data_pipeline","test_generic_class"]
+,
+    "compile": ["test_closure_complex","test_private_fields","test_returning_closures","test_type_guards"]
+
+  }
+}

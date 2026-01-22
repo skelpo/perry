@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-01-18T19:41:39Z",
+  "summary": {
+    "parity_pass": 17,
+    "parity_fail": 1,
+    "compile_fail": 25,
+    "node_fail": 0,
+    "skipped": 16,
+    "total_run": 18,
+    "parity_percentage": 94.4
+  },
+  "failures": {
+    "parity": ["test_cli_simulation"]
+,
+    "compile": ["test_json","test_map","test_method_inherit","test_method_override","test_mixed_arrays","test_mutable_capture","test_optional_chain","test_private_fields","test_process_env","test_regex","test_rest_params","test_returning_closures","test_set","test_simple_class","test_splice","test_split_simple","test_spread","test_static","test_string_methods","test_string_slice","test_string_split","test_substring","test_try_catch","test_type_guards","test_union_types"]
+
+  }
+}

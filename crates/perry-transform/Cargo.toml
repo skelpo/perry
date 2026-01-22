@@ -1,0 +1,13 @@
+[package]
+name = "perry-transform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "IR transformations: closure conversion, async lowering"
+
+[dependencies]
+perry-hir.workspace = true
+perry-types.workspace = true
+
+thiserror.workspace = true
+anyhow.workspace = true

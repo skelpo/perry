@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-01-15T09:58:33Z",
+  "summary": {
+    "parity_pass": 33,
+    "parity_fail": 13,
+    "compile_fail": 0,
+    "node_fail": 6,
+    "skipped": 7,
+    "total_run": 46,
+    "parity_percentage": 71.7
+  },
+  "failures": {
+    "parity": ["test_array_methods","test_bitwise","test_cli_simulation","test_data_pipeline","test_date","test_generic_class","test_map","test_math","test_optional_chain","test_require","test_static","test_string_slice","test_type_guards"]
+,
+    "compile": [""]
+
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-01-19T04:24:02Z",
+  "summary": {
+    "parity_pass": 9,
+    "parity_fail": 0,
+    "compile_fail": 34,
+    "node_fail": 0,
+    "skipped": 16,
+    "total_run": 9,
+    "parity_percentage": 100.0
+  },
+  "failures": {
+    "parity": [""]
+,
+    "compile": ["test_array_slice","test_bitwise","test_break_continue","test_cli_simulation","test_closure_complex","test_compound","test_data_pipeline","test_default_params","test_destructuring","test_exponent","test_for_in","test_for","test_generic_class","test_generic_func","test_getters_setters","test_incr","test_inheritance","test_json","test_map","test_method_inherit","test_method_override","test_mixed_arrays","test_mutable_capture","test_optional_chain","test_private_fields","test_process_env","test_regex","test_rest_params","test_returning_closures","test_set","test_simple_class","test_splice","test_split_simple","test_type_guards"]
+
+  }
+}

@@ -1,0 +1,415 @@
+//! SQLite module (better-sqlite3 compatible)
+//!
+//! Native implementation of the 'better-sqlite3' npm package using rusqlite.
+//! Provides synchronous SQLite database operations.
+
+use perry_runtime::{
+    js_array_alloc, js_array_push, js_object_alloc, js_object_set_field, js_string_from_bytes,
+    ArrayHeader, JSValue, ObjectHeader, StringHeader,
+};
+use rusqlite::{Connection, params_from_iter, types::Value as SqliteValue};
+use std::sync::Mutex;
+use crate::common::{get_handle, register_handle, Handle};
+
+/// Helper to extract string from StringHeader pointer
+unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let len = (*ptr).length as usize;
+    let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+    let bytes = std::slice::from_raw_parts(data_ptr, len);
+    Some(String::from_utf8_lossy(bytes).to_string())
+}
+
+/// SQLite database handle
+pub struct SqliteDbHandle {
+    pub conn: Mutex<Connection>,
+}
+
+/// SQLite statement handle
+pub struct SqliteStmtHandle {
+    pub sql: String,
+    pub db_handle: Handle,
+}
+
+/// Convert SQLite value to JSValue
+unsafe fn sqlite_value_to_jsvalue(value: &SqliteValue) -> JSValue {
+    match value {
+        SqliteValue::Null => JSValue::null(),
+        SqliteValue::Integer(n) => {
+            if *n >= i32::MIN as i64 && *n <= i32::MAX as i64 {
+                JSValue::int32(*n as i32)
+            } else {
+                JSValue::number(*n as f64)
+            }
+        }
+        SqliteValue::Real(n) => JSValue::number(*n),
+        SqliteValue::Text(s) => {
+            let ptr = js_string_from_bytes(s.as_ptr(), s.len() as u32);
+            JSValue::string_ptr(ptr)
+        }
+        SqliteValue::Blob(b) => {
+            // Return blob as hex string for now
+            let hex = hex::encode(b);
+            let ptr = js_string_from_bytes(hex.as_ptr(), hex.len() as u32);
+            JSValue::string_ptr(ptr)
+        }
+    }
+}
+
+/// new Database(filename) -> Database
+///
+/// Open or create a SQLite database.
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_open(filename_ptr: *const StringHeader) -> Handle {
+    let filename = match string_from_header(filename_ptr) {
+        Some(f) => f,
+        None => return -1,
+    };
+
+    let conn = if filename == ":memory:" {
+        Connection::open_in_memory()
+    } else {
+        Connection::open(&filename)
+    };
+
+    match conn {
+        Ok(c) => register_handle(SqliteDbHandle { conn: Mutex::new(c) }),
+        Err(_) => -1,
+    }
+}
+
+/// db.exec(sql) -> Database
+///
+/// Execute one or more SQL statements.
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_exec(db_handle: Handle, sql_ptr: *const StringHeader) -> bool {
+    let sql = match string_from_header(sql_ptr) {
+        Some(s) => s,
+        None => return false,
+    };
+
+    if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
+        if let Ok(conn) = db.conn.lock() {
+            conn.execute_batch(&sql).is_ok()
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+/// db.prepare(sql) -> Statement
+///
+/// Create a prepared statement.
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_prepare(
+    db_handle: Handle,
+    sql_ptr: *const StringHeader,
+) -> Handle {
+    let sql = match string_from_header(sql_ptr) {
+        Some(s) => s,
+        None => return -1,
+    };
+
+    // Verify the SQL is valid
+    if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
+        if let Ok(conn) = db.conn.lock() {
+            if conn.prepare(&sql).is_ok() {
+                return register_handle(SqliteStmtHandle { sql, db_handle });
+            }
+        }
+    }
+    -1
+}
+
+/// stmt.run(...params) -> RunResult
+///
+/// Execute a prepared statement with parameters.
+/// Returns { changes: number, lastInsertRowid: number }
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_stmt_run(
+    stmt_handle: Handle,
+    params_json_ptr: *const StringHeader,
+) -> *mut ObjectHeader {
+    let params_json = string_from_header(params_json_ptr).unwrap_or_else(|| "[]".to_string());
+
+    if let Some(stmt) = get_handle::<SqliteStmtHandle>(stmt_handle) {
+        if let Some(db) = get_handle::<SqliteDbHandle>(stmt.db_handle) {
+            if let Ok(conn) = db.conn.lock() {
+                // Parse params from JSON
+                let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
+                    .unwrap_or_else(|_| vec![]);
+
+                let sqlite_params: Vec<Box<dyn rusqlite::ToSql>> = params
+                    .iter()
+                    .map(|v| -> Box<dyn rusqlite::ToSql> {
+                        match v {
+                            serde_json::Value::Null => Box::new(rusqlite::types::Null),
+                            serde_json::Value::Bool(b) => Box::new(*b),
+                            serde_json::Value::Number(n) => {
+                                if let Some(i) = n.as_i64() {
+                                    Box::new(i)
+                                } else if let Some(f) = n.as_f64() {
+                                    Box::new(f)
+                                } else {
+                                    Box::new(rusqlite::types::Null)
+                                }
+                            }
+                            serde_json::Value::String(s) => Box::new(s.clone()),
+                            _ => Box::new(rusqlite::types::Null),
+                        }
+                    })
+                    .collect();
+
+                let param_refs: Vec<&dyn rusqlite::ToSql> = sqlite_params.iter().map(|p| p.as_ref()).collect();
+
+                if let Ok(changes) = conn.execute(&stmt.sql, param_refs.as_slice()) {
+                    let last_id = conn.last_insert_rowid();
+
+                    let result = js_object_alloc(0, 2);
+                    js_object_set_field(result, 0, JSValue::number(changes as f64));
+                    js_object_set_field(result, 1, JSValue::number(last_id as f64));
+                    return result;
+                }
+            }
+        }
+    }
+
+    std::ptr::null_mut()
+}
+
+/// stmt.get(...params) -> Row | undefined
+///
+/// Get a single row from a query.
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_stmt_get(
+    stmt_handle: Handle,
+    params_json_ptr: *const StringHeader,
+) -> JSValue {
+    let params_json = string_from_header(params_json_ptr).unwrap_or_else(|| "[]".to_string());
+
+    if let Some(stmt) = get_handle::<SqliteStmtHandle>(stmt_handle) {
+        if let Some(db) = get_handle::<SqliteDbHandle>(stmt.db_handle) {
+            if let Ok(conn) = db.conn.lock() {
+                let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
+                    .unwrap_or_else(|_| vec![]);
+
+                let sqlite_params: Vec<Box<dyn rusqlite::ToSql>> = params
+                    .iter()
+                    .map(|v| -> Box<dyn rusqlite::ToSql> {
+                        match v {
+                            serde_json::Value::Null => Box::new(rusqlite::types::Null),
+                            serde_json::Value::Bool(b) => Box::new(*b),
+                            serde_json::Value::Number(n) => {
+                                if let Some(i) = n.as_i64() {
+                                    Box::new(i)
+                                } else if let Some(f) = n.as_f64() {
+                                    Box::new(f)
+                                } else {
+                                    Box::new(rusqlite::types::Null)
+                                }
+                            }
+                            serde_json::Value::String(s) => Box::new(s.clone()),
+                            _ => Box::new(rusqlite::types::Null),
+                        }
+                    })
+                    .collect();
+
+                let param_refs: Vec<&dyn rusqlite::ToSql> = sqlite_params.iter().map(|p| p.as_ref()).collect();
+
+                if let Ok(mut prepared) = conn.prepare(&stmt.sql) {
+                    let column_names: Vec<String> = prepared
+                        .column_names()
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+
+                    let mut rows = prepared.query(param_refs.as_slice());
+                    if let Ok(ref mut rows) = rows {
+                        if let Ok(Some(row)) = rows.next() {
+                            let obj = js_object_alloc(0, column_names.len() as u32);
+
+                            for (idx, _name) in column_names.iter().enumerate() {
+                                let value: SqliteValue = row.get(idx).unwrap_or(SqliteValue::Null);
+                                js_object_set_field(obj, idx as u32, sqlite_value_to_jsvalue(&value));
+                            }
+
+                            return JSValue::object_ptr(obj as *mut u8);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    JSValue::undefined()
+}
+
+/// stmt.all(...params) -> Row[]
+///
+/// Get all rows from a query.
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_stmt_all(
+    stmt_handle: Handle,
+    params_json_ptr: *const StringHeader,
+) -> *mut ArrayHeader {
+    let params_json = string_from_header(params_json_ptr).unwrap_or_else(|| "[]".to_string());
+    let result_array = js_array_alloc(0);
+
+    if let Some(stmt) = get_handle::<SqliteStmtHandle>(stmt_handle) {
+        if let Some(db) = get_handle::<SqliteDbHandle>(stmt.db_handle) {
+            if let Ok(conn) = db.conn.lock() {
+                let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
+                    .unwrap_or_else(|_| vec![]);
+
+                let sqlite_params: Vec<Box<dyn rusqlite::ToSql>> = params
+                    .iter()
+                    .map(|v| -> Box<dyn rusqlite::ToSql> {
+                        match v {
+                            serde_json::Value::Null => Box::new(rusqlite::types::Null),
+                            serde_json::Value::Bool(b) => Box::new(*b),
+                            serde_json::Value::Number(n) => {
+                                if let Some(i) = n.as_i64() {
+                                    Box::new(i)
+                                } else if let Some(f) = n.as_f64() {
+                                    Box::new(f)
+                                } else {
+                                    Box::new(rusqlite::types::Null)
+                                }
+                            }
+                            serde_json::Value::String(s) => Box::new(s.clone()),
+                            _ => Box::new(rusqlite::types::Null),
+                        }
+                    })
+                    .collect();
+
+                let param_refs: Vec<&dyn rusqlite::ToSql> = sqlite_params.iter().map(|p| p.as_ref()).collect();
+
+                if let Ok(mut prepared) = conn.prepare(&stmt.sql) {
+                    let column_names: Vec<String> = prepared
+                        .column_names()
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+
+                    let mut rows = prepared.query(param_refs.as_slice());
+                    if let Ok(ref mut rows) = rows {
+                        while let Ok(Some(row)) = rows.next() {
+                            let obj = js_object_alloc(0, column_names.len() as u32);
+
+                            for (idx, _name) in column_names.iter().enumerate() {
+                                let value: SqliteValue = row.get(idx).unwrap_or(SqliteValue::Null);
+                                js_object_set_field(obj, idx as u32, sqlite_value_to_jsvalue(&value));
+                            }
+
+                            js_array_push(result_array, JSValue::object_ptr(obj as *mut u8));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result_array
+}
+
+/// db.pragma(pragma, value?) -> any
+///
+/// Execute a PRAGMA statement.
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_pragma(
+    db_handle: Handle,
+    pragma_ptr: *const StringHeader,
+    value_ptr: *const StringHeader,
+) -> *mut StringHeader {
+    let pragma = match string_from_header(pragma_ptr) {
+        Some(p) => p,
+        None => return std::ptr::null_mut(),
+    };
+
+    let value = string_from_header(value_ptr);
+
+    if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
+        if let Ok(conn) = db.conn.lock() {
+            let sql = if let Some(v) = value {
+                format!("PRAGMA {} = {}", pragma, v)
+            } else {
+                format!("PRAGMA {}", pragma)
+            };
+
+            if let Ok(mut stmt) = conn.prepare(&sql) {
+                let mut rows = stmt.query([]);
+                if let Ok(ref mut rows) = rows {
+                    if let Ok(Some(row)) = rows.next() {
+                        let result: String = row.get(0).unwrap_or_default();
+                        return js_string_from_bytes(result.as_ptr(), result.len() as u32);
+                    }
+                }
+            }
+        }
+    }
+
+    std::ptr::null_mut()
+}
+
+/// db.transaction(fn) -> Transaction
+///
+/// Begin a transaction.
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_begin_transaction(db_handle: Handle) -> bool {
+    if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
+        if let Ok(conn) = db.conn.lock() {
+            return conn.execute("BEGIN TRANSACTION", []).is_ok();
+        }
+    }
+    false
+}
+
+/// Commit a transaction.
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_commit(db_handle: Handle) -> bool {
+    if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
+        if let Ok(conn) = db.conn.lock() {
+            return conn.execute("COMMIT", []).is_ok();
+        }
+    }
+    false
+}
+
+/// Rollback a transaction.
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_rollback(db_handle: Handle) -> bool {
+    if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
+        if let Ok(conn) = db.conn.lock() {
+            return conn.execute("ROLLBACK", []).is_ok();
+        }
+    }
+    false
+}
+
+/// db.close() -> void
+///
+/// Close the database connection.
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_close(db_handle: Handle) -> bool {
+    // The connection will be closed when the handle is dropped
+    // For now, we just verify the handle is valid
+    get_handle::<SqliteDbHandle>(db_handle).is_some()
+}
+
+/// db.inTransaction -> boolean
+///
+/// Check if currently in a transaction.
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_in_transaction(db_handle: Handle) -> bool {
+    if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
+        if let Ok(conn) = db.conn.lock() {
+            // SQLite's autocommit mode is off when in a transaction
+            return !conn.is_autocommit();
+        }
+    }
+    false
+}

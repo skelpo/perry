@@ -1,0 +1,22 @@
+[package]
+name = "perry-codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cranelift code generation for Perry"
+
+[dependencies]
+perry-hir.workspace = true
+perry-types.workspace = true
+perry-runtime.workspace = true
+
+cranelift.workspace = true
+cranelift-codegen.workspace = true
+cranelift-frontend.workspace = true
+cranelift-module.workspace = true
+cranelift-native.workspace = true
+cranelift-object.workspace = true
+
+thiserror.workspace = true
+anyhow.workspace = true
+log.workspace = true

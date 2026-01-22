@@ -1,0 +1,30 @@
+[package]
+name = "perry-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Runtime library: GC, JSValue, builtins"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+libc = "0.2"
+rand = "0.8"
+regex = "1"
+sysinfo = "0.31"
+hostname = "0.4"
+dirs = "5"
+whoami = "1"
+lazy_static = "1.4"
+
+# Database clients
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+redis = "0.25"
+# mongodb = { version = "2", default-features = false, features = ["sync"] }
+serde_json = "1"
+
+# We'll add GC bindings later
+# For now, use a simple bump allocator or leak memory for MVP

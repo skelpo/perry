@@ -1,0 +1,47 @@
+# Build artifacts
+target/
+*.o
+
+# Compiled test executables (no extension)
+test_*
+!test_*.ts
+bench_*
+!bench_*.ts
+
+# Other compiled binaries
+main
+index
+http-server
+http_server_test
+15_mandelbrot
+demo
+auth
+config
+comments
+posts
+express_server
+fastify_server
+hono_server
+http_server
+searchbird_*
+
+# Generated bundles
+__perry_js_bundle.js
+
+# Node.js
+node_modules/
+
+# Temporary files
+tmp/
+
+# Private files
+private-*
+
+# OS files
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

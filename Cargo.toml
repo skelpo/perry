@@ -1,0 +1,93 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/perry",
+    "crates/perry-parser",
+    "crates/perry-types",
+    "crates/perry-hir",
+    "crates/perry-transform",
+    "crates/perry-codegen",
+    "crates/perry-runtime",
+    "crates/perry-jsruntime",
+    "crates/perry-stdlib",
+    "crates/perry-diagnostics",
+]
+
+# Aggressive release optimizations for small, fast binaries
+[profile.release]
+lto = "fat"           # Full link-time optimization
+codegen-units = 1     # Better optimization, slower compile
+panic = "abort"       # Smaller binary, no unwinding
+strip = true          # Strip symbols automatically
+opt-level = 3         # Maximum optimization
+
+# For the runtime/stdlib static libraries
+[profile.release.package.perry-runtime]
+opt-level = 3
+
+[profile.release.package.perry-stdlib]
+opt-level = "s"       # Optimize for size in stdlib
+
+[profile.release.package.perry-jsruntime]
+opt-level = 3
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/user/perry"
+
+[workspace.dependencies]
+# SWC for TypeScript parsing
+swc_ecma_parser = "32.0"
+swc_ecma_ast = "19.0"
+swc_common = "18.0"
+
+# Cranelift for code generation
+cranelift = "0.113"
+cranelift-codegen = "0.113"
+cranelift-frontend = "0.113"
+cranelift-module = "0.113"
+cranelift-native = "0.113"
+cranelift-object = "0.113"
+
+# Runtime dependencies
+# bdwgc for garbage collection (Boehm GC)
+# We'll use libgc-sys or similar
+
+# Utilities
+thiserror = "1.0"
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.10"
+clap = { version = "4.5", features = ["derive"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Terminal UI
+indicatif = "0.17"
+console = "0.15"
+
+# File system
+walkdir = "2.4"
+notify = "6.1"
+
+# Diff generation
+similar = "2.4"
+
+# Terminal detection
+atty = "0.2"
+
+# Internal crates
+perry-parser = { path = "crates/perry-parser" }
+perry-types = { path = "crates/perry-types" }
+perry-hir = { path = "crates/perry-hir" }
+perry-transform = { path = "crates/perry-transform" }
+perry-codegen = { path = "crates/perry-codegen" }
+perry-runtime = { path = "crates/perry-runtime" }
+perry-stdlib = { path = "crates/perry-stdlib" }
+perry-diagnostics = { path = "crates/perry-diagnostics" }
+perry-jsruntime = { path = "crates/perry-jsruntime" }

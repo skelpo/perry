@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-01-17T20:10:07Z",
+  "summary": {
+    "parity_pass": 42,
+    "parity_fail": 0,
+    "compile_fail": 1,
+    "node_fail": 0,
+    "skipped": 16,
+    "total_run": 42,
+    "parity_percentage": 100.0
+  },
+  "failures": {
+    "parity": [""]
+,
+    "compile": ["test_rest_params"]
+
+  }
+}

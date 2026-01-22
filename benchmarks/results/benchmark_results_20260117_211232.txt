@@ -1,0 +1,11 @@
+Performance Benchmark Results
+Date: Sat Jan 17 21:12:32 CET 2026
+Node.js: v24.4.1
+Bun: 1.3.5
+
+Benchmark                 Node.js          Bun    Compilets
+---------                 -------          ---    ---------
+bench_fibonacci            9180ms       4662ms       4357ms
+bench_array_ops              84ms         58ms        134ms
+bench_string_ops             47ms         34ms        693ms
+bench_bitwise              2718ms       2421ms       4153ms
