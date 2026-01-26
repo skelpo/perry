@@ -288,6 +288,9 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
 /// Returns the field value or undefined if the key is not found
 #[no_mangle]
 pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *const crate::StringHeader) -> JSValue {
+    if obj.is_null() {
+        return JSValue::undefined();
+    }
     unsafe {
         let keys = (*obj).keys_array;
         if keys.is_null() {
@@ -326,6 +329,9 @@ pub extern "C" fn js_object_get_field_by_name_f64(obj: *const ObjectHeader, key:
 /// If the key doesn't exist, it adds it to the object.
 #[no_mangle]
 pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *const crate::StringHeader, value: f64) {
+    if obj.is_null() {
+        return;
+    }
     unsafe {
         let keys = (*obj).keys_array;
 

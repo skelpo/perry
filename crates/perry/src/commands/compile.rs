@@ -685,6 +685,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
+    // Fix local native instance method calls within each module
+    // This handles cases like: const pool = mysql.createPool(); pool.execute();
+    for (_, hir_module) in ctx.native_modules.iter_mut() {
+        perry_hir::fix_local_native_instances(hir_module);
+    }
+
     // Fix cross-module native instance method calls
     if !exported_instances.is_empty() {
         for (_, hir_module) in ctx.native_modules.iter_mut() {

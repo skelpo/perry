@@ -9,6 +9,6 @@ pub mod lower;
 pub mod monomorph;
 
 pub use ir::*;
-pub use js_transform::{transform_js_imports, fix_cross_module_native_instances, ExportedNativeInstance};
+pub use js_transform::{transform_js_imports, fix_cross_module_native_instances, fix_local_native_instances, ExportedNativeInstance};
 pub use lower::lower_module;
 pub use monomorph::monomorphize_module;

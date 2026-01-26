@@ -558,6 +558,50 @@ pub extern "C" fn js_array_filter(arr: *const ArrayHeader, callback: *const Clos
     }
 }
 
+/// find - find first element that matches callback(element) => true
+/// Returns the element as f64, or f64::NAN (undefined) if not found
+#[no_mangle]
+pub extern "C" fn js_array_find(arr: *const ArrayHeader, callback: *const ClosureHeader) -> f64 {
+    unsafe {
+        let length = (*arr).length;
+        let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+
+        for i in 0..length as usize {
+            let element = *elements_ptr.add(i);
+            let result = js_closure_call1(callback, element);
+            // Truthy check: non-zero value
+            if result != 0.0 {
+                return element;
+            }
+        }
+
+        // Not found - return undefined (NaN)
+        f64::NAN
+    }
+}
+
+/// findIndex - find index of first element that matches callback(element) => true
+/// Returns the index as i32, or -1 if not found
+#[no_mangle]
+pub extern "C" fn js_array_findIndex(arr: *const ArrayHeader, callback: *const ClosureHeader) -> i32 {
+    unsafe {
+        let length = (*arr).length;
+        let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+
+        for i in 0..length as usize {
+            let element = *elements_ptr.add(i);
+            let result = js_closure_call1(callback, element);
+            // Truthy check: non-zero value
+            if result != 0.0 {
+                return i as i32;
+            }
+        }
+
+        // Not found
+        -1
+    }
+}
+
 /// reduce - accumulate values using callback(accumulator, element)
 /// initial_ptr is pointer to f64 initial value (null if not provided)
 /// Returns the final accumulated value

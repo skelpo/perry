@@ -45,8 +45,10 @@ pub struct LoweringContext {
     type_aliases: Vec<(String, TypeAliasId, Vec<TypeParam>, Type)>,
     /// Imported functions: local_name -> original_name (the exported name in the source module)
     imported_functions: Vec<(String, String)>,
-    /// Native module imports: local_name -> module_name (e.g., "mysql" -> "mysql2/promise")
-    native_modules: Vec<(String, String)>,
+    /// Native module imports: local_name -> (module_name, method_name)
+    /// For namespace imports (import * as x), method_name is None
+    /// For named imports (import { v4 as uuid }), method_name is Some("v4")
+    native_modules: Vec<(String, String, Option<String>)>,
     /// Built-in module aliases from require(): local_name -> module_name (e.g., "myFs" -> "fs")
     builtin_module_aliases: Vec<(String, String)>,
     /// Stack of type parameter scopes (for nested generics)
@@ -236,12 +238,14 @@ impl LoweringContext {
             .map(|(_, params, ret)| (params, ret))
     }
 
-    fn register_native_module(&mut self, local_name: String, module_name: String) {
-        self.native_modules.push((local_name, module_name));
+    fn register_native_module(&mut self, local_name: String, module_name: String, method_name: Option<String>) {
+        self.native_modules.push((local_name, module_name, method_name));
     }
 
-    fn lookup_native_module(&self, name: &str) -> Option<&str> {
-        self.native_modules.iter().find(|(n, _)| n == name).map(|(_, m)| m.as_str())
+    fn lookup_native_module(&self, name: &str) -> Option<(&str, Option<&str>)> {
+        self.native_modules.iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, m, method)| (m.as_str(), method.as_ref().map(|s| s.as_str())))
     }
 
     fn register_builtin_module_alias(&mut self, local_name: String, module_name: String) {
@@ -762,8 +766,9 @@ fn lower_module_decl(
                             })
                             .unwrap_or_else(|| local.clone());
                         if is_native {
-                            // Register as native module function
-                            ctx.register_native_module(local.clone(), source.clone());
+                            // Register as native module function with the original method name
+                            // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
+                            ctx.register_native_module(local.clone(), source.clone(), Some(imported.clone()));
                         } else {
                             // Register as imported function (we assume all imports are functions for now)
                             ctx.register_imported_func(local.clone(), imported.clone());
@@ -774,7 +779,8 @@ fn lower_module_decl(
                         let local = default.local.sym.to_string();
                         if is_native {
                             // Default import of native module (e.g., import mysql from 'mysql2/promise')
-                            ctx.register_native_module(local.clone(), source.clone());
+                            // Default exports don't have a method name
+                            ctx.register_native_module(local.clone(), source.clone(), None);
                         } else {
                             // Default import from JS module - register so calls resolve to ExternFuncRef
                             // The original name is "default" for default exports
@@ -786,7 +792,8 @@ fn lower_module_decl(
                         let local = ns.local.sym.to_string();
                         if is_native {
                             // Namespace import of native module (e.g., import * as mysql from 'mysql2')
-                            ctx.register_native_module(local.clone(), source.clone());
+                            // Methods are called via the namespace, so no specific method name
+                            ctx.register_native_module(local.clone(), source.clone(), None);
                         } else {
                             // Namespace import from JS module - register so calls resolve to ExternFuncRef
                             ctx.register_imported_func(local.clone(), local.clone());
@@ -2772,7 +2779,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                 Ok(Expr::LocalGet(id))
             } else if let Some(id) = ctx.lookup_func(&name) {
                 Ok(Expr::FuncRef(id))
-            } else if let Some(module_name) = ctx.lookup_native_module(&name) {
+            } else if let Some((module_name, _method_name)) = ctx.lookup_native_module(&name) {
                 // Native module reference (e.g., mysql from 'mysql2/promise')
                 Ok(Expr::NativeModuleRef(module_name.to_string()))
             } else if let Some(orig_name) = ctx.lookup_imported_func(&name) {
@@ -3047,12 +3054,13 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                 }
                             }
 
-                            if let Some(module_name) = ctx.lookup_native_module(&obj_name) {
+                            if let Some((module_name, _imported_method)) = ctx.lookup_native_module(&obj_name) {
                                 // This is a call on a native module (e.g., mysql.createConnection)
                                 if let ast::MemberProp::Ident(method_ident) = &member.prop {
                                     let method_name = method_ident.sym.to_string();
                                     return Ok(Expr::NativeMethodCall {
                                         module: module_name.to_string(),
+                                        class_name: None,  // Will be set by js_transform if needed
                                         object: None,  // Static call on module itself
                                         method: method_name,
                                         args,
@@ -3095,6 +3103,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     let object_expr = lower_expr(ctx, &member.obj)?;
                                     return Ok(Expr::NativeMethodCall {
                                         module: module_name,
+                                        class_name: None,  // Will be set by js_transform if needed
                                         object: Some(Box::new(object_expr)),
                                         method: method_name,
                                         args,
@@ -3111,6 +3120,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                 let object_expr = lower_expr(ctx, &member.obj)?;
                                 return Ok(Expr::NativeMethodCall {
                                     module: module_name.to_string(),
+                                    class_name: None,  // Will be set by js_transform if needed
                                     object: Some(Box::new(object_expr)),
                                     method: method_name,
                                     args,
@@ -3126,7 +3136,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                             // Lower the object expression first
                             let object_expr = lower_expr(ctx, &member.obj)?;
                             // Check if it's a NativeMethodCall for a math library
-                            if let Expr::NativeMethodCall { module, .. } = &object_expr {
+                            if let Expr::NativeMethodCall { module, class_name, .. } = &object_expr {
                                 // Methods that return the same type (builder pattern)
                                 let is_math_lib = matches!(module.as_str(), "big.js" | "decimal.js" | "bignumber.js");
                                 let is_fluent_method = matches!(method_name.as_str(),
@@ -3136,6 +3146,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                 if is_math_lib && is_fluent_method {
                                     return Ok(Expr::NativeMethodCall {
                                         module: module.clone(),
+                                        class_name: class_name.clone(),
                                         object: Some(Box::new(object_expr)),
                                         method: method_name,
                                         args,
@@ -3685,6 +3696,22 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                 });
                                             }
                                         }
+                                        "find" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArrayFind {
+                                                    array: Box::new(Expr::LocalGet(array_id)),
+                                                    callback: Box::new(args.into_iter().next().unwrap()),
+                                                });
+                                            }
+                                        }
+                                        "findIndex" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArrayFindIndex {
+                                                    array: Box::new(Expr::LocalGet(array_id)),
+                                                    callback: Box::new(args.into_iter().next().unwrap()),
+                                                });
+                                            }
+                                        }
                                         "reduce" => {
                                             if args.len() >= 1 {
                                                 let mut args_iter = args.into_iter();
@@ -3949,7 +3976,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                         }
 
                         // Check if this is a named import from child_process (e.g., execSync, spawnSync)
-                        if let Some(module_name) = ctx.lookup_native_module(func_name) {
+                        if let Some((module_name, _method)) = ctx.lookup_native_module(func_name) {
                             if module_name == "child_process" {
                                 match func_name {
                                     "execSync" => {
@@ -4005,6 +4032,18 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     _ => {} // Fall through
                                 }
                             }
+                        }
+
+                        // Check if this is a direct call on an aliased named import
+                        // e.g., uuid() where import { v4 as uuid } from 'uuid'
+                        if let Some((module_name, Some(method_name))) = ctx.lookup_native_module(func_name) {
+                            return Ok(Expr::NativeMethodCall {
+                                module: module_name.to_string(),
+                                class_name: None,
+                                object: None,
+                                method: method_name.to_string(),
+                                args,
+                            });
                         }
                     }
 
@@ -6499,7 +6538,7 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
                 collect_local_refs_expr(item, refs);
             }
         }
-        Expr::ArrayForEach { array, callback } | Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } => {
+        Expr::ArrayForEach { array, callback } | Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } | Expr::ArrayFind { array, callback } | Expr::ArrayFindIndex { array, callback } => {
             collect_local_refs_expr(array, refs);
             collect_local_refs_expr(callback, refs);
         }
@@ -7117,7 +7156,7 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
                 collect_assigned_locals_expr(item, assigned);
             }
         }
-        Expr::ArrayForEach { array, callback } | Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } => {
+        Expr::ArrayForEach { array, callback } | Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } | Expr::ArrayFind { array, callback } | Expr::ArrayFindIndex { array, callback } => {
             collect_assigned_locals_expr(array, assigned);
             collect_assigned_locals_expr(callback, assigned);
         }
@@ -7536,5 +7575,5 @@ fn closure_uses_this(body: &[Stmt]) -> bool {
 
 /// Check if a name is a built-in global function provided by the runtime
 fn is_builtin_function(name: &str) -> bool {
-    matches!(name, "setTimeout" | "setInterval" | "clearTimeout" | "clearInterval")
+    matches!(name, "setTimeout" | "setInterval" | "clearTimeout" | "clearInterval" | "fetch")
 }

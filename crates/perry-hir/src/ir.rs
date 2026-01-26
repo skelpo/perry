@@ -21,6 +21,7 @@ pub const NATIVE_MODULES: &[&str] = &[
     "crypto",
     // Tier 3
     "dotenv",
+    "dotenv/config",  // Side-effect import that auto-calls dotenv.config()
     "jsonwebtoken",
     "nanoid",
     "slugify",
@@ -497,11 +498,13 @@ pub enum Expr {
 
     // Native module method call (e.g., mysql.createConnection, connection.query)
     // module: the native module name (e.g., "mysql2")
+    // class_name: optional class name for distinguishing object types (e.g., "Pool" vs "Connection")
     // object: optional object to call method on (None for static methods like createConnection)
     // method: the method name
     // args: call arguments
     NativeMethodCall {
         module: String,
+        class_name: Option<String>,
         object: Option<Box<Expr>>,
         method: String,
         args: Vec<Expr>,
@@ -801,6 +804,8 @@ pub enum Expr {
     ArrayForEach { array: Box<Expr>, callback: Box<Expr> },  // arr.forEach(fn) -> void
     ArrayMap { array: Box<Expr>, callback: Box<Expr> },      // arr.map(fn) -> new array
     ArrayFilter { array: Box<Expr>, callback: Box<Expr> },   // arr.filter(fn) -> new array
+    ArrayFind { array: Box<Expr>, callback: Box<Expr> },     // arr.find(fn) -> element | undefined
+    ArrayFindIndex { array: Box<Expr>, callback: Box<Expr> }, // arr.findIndex(fn) -> index | -1
     ArrayReduce { array: Box<Expr>, callback: Box<Expr>, initial: Option<Box<Expr>> }, // arr.reduce(fn, init?) -> value
     ArrayJoin { array: Box<Expr>, separator: Option<Box<Expr>> }, // arr.join(separator?) -> string
 

@@ -956,7 +956,7 @@ fn fix_native_instance_expr(expr: &mut Expr, native_instances: &HashMap<String, 
             if let Expr::PropertyGet { object, property } = callee.as_mut() {
                 // Check if the object is an ExternFuncRef that's a native instance
                 if let Expr::ExternFuncRef { name, .. } = object.as_ref() {
-                    if let Some((native_module, _native_class)) = native_instances.get(name) {
+                    if let Some((native_module, native_class)) = native_instances.get(name) {
                         // Transform args first
                         for arg in args.iter_mut() {
                             fix_native_instance_expr(arg, native_instances);
@@ -967,6 +967,7 @@ fn fix_native_instance_expr(expr: &mut Expr, native_instances: &HashMap<String, 
                         // Transform to NativeMethodCall
                         *expr = Expr::NativeMethodCall {
                             module: native_module.clone(),
+                            class_name: Some(native_class.clone()),
                             object: Some(Box::new(object_expr)),
                             method: property.clone(),
                             args: args_owned,
@@ -1052,7 +1053,7 @@ fn fix_native_instance_expr(expr: &mut Expr, native_instances: &HashMap<String, 
             if let Expr::Call { callee, args, .. } = inner.as_mut() {
                 if let Expr::PropertyGet { object, property } = callee.as_mut() {
                     if let Expr::ExternFuncRef { name, .. } = object.as_ref() {
-                        if let Some((native_module, _native_class)) = native_instances.get(name) {
+                        if let Some((native_module, native_class)) = native_instances.get(name) {
                             // Transform args first
                             for arg in args.iter_mut() {
                                 fix_native_instance_expr(arg, native_instances);
@@ -1063,6 +1064,7 @@ fn fix_native_instance_expr(expr: &mut Expr, native_instances: &HashMap<String, 
                             // Replace the inner Call with NativeMethodCall (wrapped by Await)
                             *inner.as_mut() = Expr::NativeMethodCall {
                                 module: native_module.clone(),
+                                class_name: Some(native_class.clone()),
                                 object: Some(Box::new(object_expr)),
                                 method: property.clone(),
                                 args: args_owned,
@@ -1150,5 +1152,431 @@ fn fix_native_instance_expr(expr: &mut Expr, native_instances: &HashMap<String, 
         // Many more expressions can contain sub-expressions, but for the first pass,
         // we'll focus on the most common patterns
         _ => {}
+    }
+}
+
+/// Fix local native instance method calls within the same module
+///
+/// This function tracks variables that are assigned from native module creation functions
+/// (like mysql.createPool(), mysql.createConnection()) and transforms subsequent method
+/// calls on those variables into NativeMethodCall expressions.
+///
+/// For example:
+/// ```typescript
+/// const pool = mysql.createPool({...});  // Tracked as mysql2/promise pool
+/// await pool.execute(sql, params);       // Transformed to NativeMethodCall
+/// ```
+pub fn fix_local_native_instances(module: &mut Module) {
+    // Build maps for tracking native instances:
+    // - by name (for ExternFuncRef - imported variables)
+    // - by LocalId (for LocalGet - local variables)
+    let mut local_native_instances: HashMap<String, (String, String)> = HashMap::new();
+    let mut local_id_native_instances: HashMap<LocalId, (String, String)> = HashMap::new();
+
+    // Scan init statements for native instance creations (recursively)
+    for stmt in &module.init {
+        scan_stmt_for_native_instances(stmt, &mut local_native_instances, &mut local_id_native_instances);
+    }
+
+    // Transform method calls on these native instances in init
+    for stmt in &mut module.init {
+        fix_native_instance_stmt_with_locals(stmt, &local_native_instances, &local_id_native_instances);
+    }
+
+    // Process each function separately with its own local variable scope
+    for func in &mut module.functions {
+        // Build per-function local mapping by scanning all statements recursively
+        let mut func_local_ids: HashMap<LocalId, (String, String)> = local_id_native_instances.clone();
+        let mut func_local_names: HashMap<String, (String, String)> = local_native_instances.clone();
+        for stmt in &func.body {
+            scan_stmt_for_native_instances(stmt, &mut func_local_names, &mut func_local_ids);
+        }
+        // Transform method calls
+        for stmt in &mut func.body {
+            fix_native_instance_stmt_with_locals(stmt, &func_local_names, &func_local_ids);
+        }
+    }
+
+    for class in &mut module.classes {
+        if let Some(ctor) = &mut class.constructor {
+            let mut ctor_local_ids = local_id_native_instances.clone();
+            let mut ctor_local_names = local_native_instances.clone();
+            for stmt in &ctor.body {
+                scan_stmt_for_native_instances(stmt, &mut ctor_local_names, &mut ctor_local_ids);
+            }
+            for stmt in &mut ctor.body {
+                fix_native_instance_stmt_with_locals(stmt, &ctor_local_names, &ctor_local_ids);
+            }
+        }
+        for method in &mut class.methods {
+            let mut method_local_ids = local_id_native_instances.clone();
+            let mut method_local_names = local_native_instances.clone();
+            for stmt in &method.body {
+                scan_stmt_for_native_instances(stmt, &mut method_local_names, &mut method_local_ids);
+            }
+            for stmt in &mut method.body {
+                fix_native_instance_stmt_with_locals(stmt, &method_local_names, &method_local_ids);
+            }
+        }
+        for method in &mut class.static_methods {
+            let mut method_local_ids = local_id_native_instances.clone();
+            let mut method_local_names = local_native_instances.clone();
+            for stmt in &method.body {
+                scan_stmt_for_native_instances(stmt, &mut method_local_names, &mut method_local_ids);
+            }
+            for stmt in &mut method.body {
+                fix_native_instance_stmt_with_locals(stmt, &method_local_names, &method_local_ids);
+            }
+        }
+    }
+}
+
+/// Recursively scan a statement for native instance creations (Let assignments)
+fn scan_stmt_for_native_instances(
+    stmt: &Stmt,
+    local_names: &mut HashMap<String, (String, String)>,
+    local_ids: &mut HashMap<LocalId, (String, String)>,
+) {
+    match stmt {
+        Stmt::Let { id, name, init: Some(init_expr), .. } => {
+            if let Some((native_module, class_name)) = detect_native_instance_creation(init_expr) {
+                local_names.insert(name.clone(), (native_module.clone(), class_name.clone()));
+                local_ids.insert(*id, (native_module, class_name));
+            }
+        }
+        Stmt::If { then_branch, else_branch, .. } => {
+            for s in then_branch {
+                scan_stmt_for_native_instances(s, local_names, local_ids);
+            }
+            if let Some(else_stmts) = else_branch {
+                for s in else_stmts {
+                    scan_stmt_for_native_instances(s, local_names, local_ids);
+                }
+            }
+        }
+        Stmt::While { body, .. } => {
+            for s in body {
+                scan_stmt_for_native_instances(s, local_names, local_ids);
+            }
+        }
+        Stmt::For { init, body, .. } => {
+            if let Some(init_stmt) = init {
+                scan_stmt_for_native_instances(init_stmt.as_ref(), local_names, local_ids);
+            }
+            for s in body {
+                scan_stmt_for_native_instances(s, local_names, local_ids);
+            }
+        }
+        Stmt::Try { body, catch, finally } => {
+            for s in body {
+                scan_stmt_for_native_instances(s, local_names, local_ids);
+            }
+            if let Some(catch_clause) = catch {
+                for s in &catch_clause.body {
+                    scan_stmt_for_native_instances(s, local_names, local_ids);
+                }
+            }
+            if let Some(finally_stmts) = finally {
+                for s in finally_stmts {
+                    scan_stmt_for_native_instances(s, local_names, local_ids);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn fix_native_instance_stmt_with_locals(
+    stmt: &mut Stmt,
+    native_instances: &HashMap<String, (String, String)>,
+    local_id_instances: &HashMap<LocalId, (String, String)>,
+) {
+    match stmt {
+        Stmt::Expr(expr) => fix_native_instance_expr_with_locals(expr, native_instances, local_id_instances),
+        Stmt::Let { init, .. } => {
+            if let Some(e) = init {
+                fix_native_instance_expr_with_locals(e, native_instances, local_id_instances);
+            }
+        }
+        Stmt::Return(Some(e)) => fix_native_instance_expr_with_locals(e, native_instances, local_id_instances),
+        Stmt::Return(None) => {}
+        Stmt::If { condition, then_branch, else_branch } => {
+            fix_native_instance_expr_with_locals(condition, native_instances, local_id_instances);
+            for s in then_branch {
+                fix_native_instance_stmt_with_locals(s, native_instances, local_id_instances);
+            }
+            if let Some(else_stmts) = else_branch {
+                for s in else_stmts {
+                    fix_native_instance_stmt_with_locals(s, native_instances, local_id_instances);
+                }
+            }
+        }
+        Stmt::While { condition, body } => {
+            fix_native_instance_expr_with_locals(condition, native_instances, local_id_instances);
+            for s in body {
+                fix_native_instance_stmt_with_locals(s, native_instances, local_id_instances);
+            }
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(init_stmt) = init {
+                fix_native_instance_stmt_with_locals(init_stmt.as_mut(), native_instances, local_id_instances);
+            }
+            if let Some(cond) = condition {
+                fix_native_instance_expr_with_locals(cond, native_instances, local_id_instances);
+            }
+            if let Some(upd) = update {
+                fix_native_instance_expr_with_locals(upd, native_instances, local_id_instances);
+            }
+            for s in body {
+                fix_native_instance_stmt_with_locals(s, native_instances, local_id_instances);
+            }
+        }
+        Stmt::Try { body, catch, finally } => {
+            for s in body {
+                fix_native_instance_stmt_with_locals(s, native_instances, local_id_instances);
+            }
+            if let Some(ref mut catch_clause) = catch {
+                for s in &mut catch_clause.body {
+                    fix_native_instance_stmt_with_locals(s, native_instances, local_id_instances);
+                }
+            }
+            if let Some(finally_stmts) = finally {
+                for s in finally_stmts {
+                    fix_native_instance_stmt_with_locals(s, native_instances, local_id_instances);
+                }
+            }
+        }
+        Stmt::Throw(e) => fix_native_instance_expr_with_locals(e, native_instances, local_id_instances),
+        Stmt::Switch { discriminant, cases } => {
+            fix_native_instance_expr_with_locals(discriminant, native_instances, local_id_instances);
+            for case in cases {
+                if let Some(test) = &mut case.test {
+                    fix_native_instance_expr_with_locals(test, native_instances, local_id_instances);
+                }
+                for s in &mut case.body {
+                    fix_native_instance_stmt_with_locals(s, native_instances, local_id_instances);
+                }
+            }
+        }
+        Stmt::Break | Stmt::Continue => {}
+    }
+}
+
+fn fix_native_instance_expr_with_locals(
+    expr: &mut Expr,
+    native_instances: &HashMap<String, (String, String)>,
+    local_id_instances: &HashMap<LocalId, (String, String)>,
+) {
+    match expr {
+        // The key case: method calls that might be on native instances
+        Expr::Call { callee, args, .. } => {
+            // Check if this is a method call: obj.method(args)
+            if let Expr::PropertyGet { object, property } = callee.as_mut() {
+                // Check for LocalGet (local variable)
+                if let Expr::LocalGet(local_id) = object.as_ref() {
+                    if let Some((native_module, native_class)) = local_id_instances.get(local_id) {
+                        // Transform args first
+                        for arg in args.iter_mut() {
+                            fix_native_instance_expr_with_locals(arg, native_instances, local_id_instances);
+                        }
+                        let args_owned: Vec<Expr> = args.drain(..).collect();
+                        let object_expr = std::mem::replace(object.as_mut(), Expr::Undefined);
+
+                        // Transform to NativeMethodCall
+                        *expr = Expr::NativeMethodCall {
+                            module: native_module.clone(),
+                            class_name: Some(native_class.clone()),
+                            object: Some(Box::new(object_expr)),
+                            method: property.clone(),
+                            args: args_owned,
+                        };
+                        return;
+                    }
+                }
+                // Check for ExternFuncRef (imported native instance)
+                if let Expr::ExternFuncRef { name, .. } = object.as_ref() {
+                    if let Some((native_module, native_class)) = native_instances.get(name) {
+                        // Transform args first
+                        for arg in args.iter_mut() {
+                            fix_native_instance_expr_with_locals(arg, native_instances, local_id_instances);
+                        }
+                        let args_owned: Vec<Expr> = args.drain(..).collect();
+                        let object_expr = std::mem::replace(object.as_mut(), Expr::Undefined);
+
+                        // Transform to NativeMethodCall
+                        *expr = Expr::NativeMethodCall {
+                            module: native_module.clone(),
+                            class_name: Some(native_class.clone()),
+                            object: Some(Box::new(object_expr)),
+                            method: property.clone(),
+                            args: args_owned,
+                        };
+                        return;
+                    }
+                }
+            }
+
+            // Not a native instance call, recurse
+            fix_native_instance_expr_with_locals(callee, native_instances, local_id_instances);
+            for arg in args {
+                fix_native_instance_expr_with_locals(arg, native_instances, local_id_instances);
+            }
+        }
+        Expr::Await(inner) => {
+            // Handle Await(Call{PropertyGet{LocalGet...}}) pattern for async method calls
+            if let Expr::Call { callee, args, .. } = inner.as_mut() {
+                if let Expr::PropertyGet { object, property } = callee.as_mut() {
+                    // Check for LocalGet
+                    if let Expr::LocalGet(local_id) = object.as_ref() {
+                        if let Some((native_module, native_class)) = local_id_instances.get(local_id) {
+                            // Transform args first
+                            for arg in args.iter_mut() {
+                                fix_native_instance_expr_with_locals(arg, native_instances, local_id_instances);
+                            }
+                            let args_owned: Vec<Expr> = args.drain(..).collect();
+                            let object_expr = std::mem::replace(object.as_mut(), Expr::Undefined);
+
+                            // Replace the inner Call with NativeMethodCall (wrapped by Await)
+                            *inner.as_mut() = Expr::NativeMethodCall {
+                                module: native_module.clone(),
+                                class_name: Some(native_class.clone()),
+                                object: Some(Box::new(object_expr)),
+                                method: property.clone(),
+                                args: args_owned,
+                            };
+                            return;
+                        }
+                    }
+                    // Check for ExternFuncRef
+                    if let Expr::ExternFuncRef { name, .. } = object.as_ref() {
+                        if let Some((native_module, native_class)) = native_instances.get(name) {
+                            // Transform args first
+                            for arg in args.iter_mut() {
+                                fix_native_instance_expr_with_locals(arg, native_instances, local_id_instances);
+                            }
+                            let args_owned: Vec<Expr> = args.drain(..).collect();
+                            let object_expr = std::mem::replace(object.as_mut(), Expr::Undefined);
+
+                            // Replace the inner Call with NativeMethodCall (wrapped by Await)
+                            *inner.as_mut() = Expr::NativeMethodCall {
+                                module: native_module.clone(),
+                                class_name: Some(native_class.clone()),
+                                object: Some(Box::new(object_expr)),
+                                method: property.clone(),
+                                args: args_owned,
+                            };
+                            return;
+                        }
+                    }
+                }
+            }
+            fix_native_instance_expr_with_locals(inner, native_instances, local_id_instances);
+        }
+        // Recurse into other expressions
+        Expr::Binary { left, right, .. } => {
+            fix_native_instance_expr_with_locals(left, native_instances, local_id_instances);
+            fix_native_instance_expr_with_locals(right, native_instances, local_id_instances);
+        }
+        Expr::Unary { operand, .. } => {
+            fix_native_instance_expr_with_locals(operand, native_instances, local_id_instances);
+        }
+        Expr::Logical { left, right, .. } => {
+            fix_native_instance_expr_with_locals(left, native_instances, local_id_instances);
+            fix_native_instance_expr_with_locals(right, native_instances, local_id_instances);
+        }
+        Expr::Compare { left, right, .. } => {
+            fix_native_instance_expr_with_locals(left, native_instances, local_id_instances);
+            fix_native_instance_expr_with_locals(right, native_instances, local_id_instances);
+        }
+        Expr::LocalSet(_, value) => {
+            fix_native_instance_expr_with_locals(value, native_instances, local_id_instances);
+        }
+        Expr::GlobalSet(_, value) => {
+            fix_native_instance_expr_with_locals(value, native_instances, local_id_instances);
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            fix_native_instance_expr_with_locals(condition, native_instances, local_id_instances);
+            fix_native_instance_expr_with_locals(then_expr, native_instances, local_id_instances);
+            fix_native_instance_expr_with_locals(else_expr, native_instances, local_id_instances);
+        }
+        Expr::Array(elements) => {
+            for elem in elements {
+                fix_native_instance_expr_with_locals(elem, native_instances, local_id_instances);
+            }
+        }
+        Expr::ArraySpread(elements) => {
+            for elem in elements {
+                match elem {
+                    crate::ir::ArrayElement::Expr(e) => fix_native_instance_expr_with_locals(e, native_instances, local_id_instances),
+                    crate::ir::ArrayElement::Spread(e) => fix_native_instance_expr_with_locals(e, native_instances, local_id_instances),
+                }
+            }
+        }
+        Expr::Object(properties) => {
+            for (_, value) in properties {
+                fix_native_instance_expr_with_locals(value, native_instances, local_id_instances);
+            }
+        }
+        Expr::PropertyGet { object, .. } => {
+            fix_native_instance_expr_with_locals(object, native_instances, local_id_instances);
+        }
+        Expr::PropertySet { object, value, .. } => {
+            fix_native_instance_expr_with_locals(object, native_instances, local_id_instances);
+            fix_native_instance_expr_with_locals(value, native_instances, local_id_instances);
+        }
+        Expr::IndexGet { object, index } => {
+            fix_native_instance_expr_with_locals(object, native_instances, local_id_instances);
+            fix_native_instance_expr_with_locals(index, native_instances, local_id_instances);
+        }
+        Expr::IndexSet { object, index, value } => {
+            fix_native_instance_expr_with_locals(object, native_instances, local_id_instances);
+            fix_native_instance_expr_with_locals(index, native_instances, local_id_instances);
+            fix_native_instance_expr_with_locals(value, native_instances, local_id_instances);
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(obj) = object {
+                fix_native_instance_expr_with_locals(obj, native_instances, local_id_instances);
+            }
+            for arg in args {
+                fix_native_instance_expr_with_locals(arg, native_instances, local_id_instances);
+            }
+        }
+        Expr::New { args, .. } | Expr::SuperCall(args) => {
+            for arg in args {
+                fix_native_instance_expr_with_locals(arg, native_instances, local_id_instances);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Detect if an expression is creating a native module instance
+/// Returns Some((module_name, class_name)) if it is
+fn detect_native_instance_creation(expr: &Expr) -> Option<(String, String)> {
+    match expr {
+        Expr::NativeMethodCall { module, object: None, method, .. } => {
+            // Creation functions like mysql.createPool(), mysql.createConnection()
+            let class_name = match method.as_str() {
+                "createPool" => "Pool",
+                "createConnection" => "Connection",
+                _ => return None,
+            };
+            Some((module.clone(), class_name.to_string()))
+        }
+        Expr::Call { callee, .. } => {
+            // Check for global fetch() call
+            if let Expr::ExternFuncRef { name, .. } = callee.as_ref() {
+                if name == "fetch" {
+                    // fetch() returns a Response
+                    return Some(("fetch".to_string(), "Response".to_string()));
+                }
+            }
+            None
+        }
+        Expr::Await(inner) => {
+            // Async creation: await mysql.createConnection() or await fetch()
+            detect_native_instance_creation(inner)
+        }
+        _ => None,
     }
 }

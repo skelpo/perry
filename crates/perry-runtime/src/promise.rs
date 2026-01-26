@@ -173,6 +173,28 @@ pub extern "C" fn js_promise_then(
     next
 }
 
+/// Register rejection callback, returns a new promise for chaining
+/// This is equivalent to .catch(onRejected) in JavaScript
+#[no_mangle]
+pub extern "C" fn js_promise_catch(
+    promise: *mut Promise,
+    on_rejected: Option<PromiseCallback>,
+) -> *mut Promise {
+    js_promise_then(promise, None, on_rejected)
+}
+
+/// Register finally callback, returns a new promise for chaining
+/// This is equivalent to .finally(onFinally) in JavaScript
+#[no_mangle]
+pub extern "C" fn js_promise_finally(
+    promise: *mut Promise,
+    on_finally: Option<PromiseCallback>,
+) -> *mut Promise {
+    // For finally, we pass the same callback for both fulfilled and rejected
+    // The finally callback doesn't receive any arguments in JS
+    js_promise_then(promise, on_finally, on_finally)
+}
+
 /// Process all pending promise callbacks (run microtasks)
 #[no_mangle]
 pub extern "C" fn js_promise_run_microtasks() -> i32 {

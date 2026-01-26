@@ -904,8 +904,9 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
             return_type: return_type.clone(),
         },
         Expr::NativeModuleRef(name) => Expr::NativeModuleRef(name.clone()),
-        Expr::NativeMethodCall { module, object, method, args } => Expr::NativeMethodCall {
+        Expr::NativeMethodCall { module, class_name, object, method, args } => Expr::NativeMethodCall {
             module: module.clone(),
+            class_name: class_name.clone(),
             object: object.as_ref().map(|o| Box::new(substitute_expr(o, substitutions))),
             method: method.clone(),
             args: args.iter().map(|a| substitute_expr(a, substitutions)).collect(),
@@ -1073,6 +1074,14 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
             callback: Box::new(substitute_expr(callback, substitutions)),
         },
         Expr::ArrayFilter { array, callback } => Expr::ArrayFilter {
+            array: Box::new(substitute_expr(array, substitutions)),
+            callback: Box::new(substitute_expr(callback, substitutions)),
+        },
+        Expr::ArrayFind { array, callback } => Expr::ArrayFind {
+            array: Box::new(substitute_expr(array, substitutions)),
+            callback: Box::new(substitute_expr(callback, substitutions)),
+        },
+        Expr::ArrayFindIndex { array, callback } => Expr::ArrayFindIndex {
             array: Box::new(substitute_expr(array, substitutions)),
             callback: Box::new(substitute_expr(callback, substitutions)),
         },

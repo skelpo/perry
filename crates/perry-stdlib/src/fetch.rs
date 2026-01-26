@@ -172,6 +172,100 @@ pub unsafe extern "C" fn js_fetch_post(
     promise
 }
 
+/// Perform a fetch request with full options (method, headers, body)
+/// This is the most flexible fetch function
+#[no_mangle]
+pub unsafe extern "C" fn js_fetch_with_options(
+    url_ptr: *const StringHeader,
+    method_ptr: *const StringHeader,
+    body_ptr: *const StringHeader,
+    headers_json_ptr: *const StringHeader,
+) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let promise_ptr = promise as usize;
+
+    let url = match string_from_header(url_ptr) {
+        Some(u) => u,
+        None => {
+            let err_msg = "Invalid URL";
+            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            queue_promise_resolution(promise_ptr, false, err_bits);
+            return promise;
+        }
+    };
+
+    let method = string_from_header(method_ptr).unwrap_or_else(|| "GET".to_string());
+    let body = string_from_header(body_ptr);
+    let headers_json = string_from_header(headers_json_ptr).unwrap_or_else(|| "{}".to_string());
+
+    // Parse headers from JSON
+    let custom_headers: HashMap<String, String> = serde_json::from_str(&headers_json).unwrap_or_default();
+
+    spawn(async move {
+        let client = reqwest::Client::new();
+        let mut request = match method.to_uppercase().as_str() {
+            "POST" => client.post(&url),
+            "PUT" => client.put(&url),
+            "DELETE" => client.delete(&url),
+            "PATCH" => client.patch(&url),
+            "HEAD" => client.head(&url),
+            _ => client.get(&url), // Default to GET
+        };
+
+        // Add custom headers
+        for (key, value) in &custom_headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+
+        // Add body if present
+        if let Some(b) = body {
+            request = request.body(b);
+        }
+
+        match request.send().await {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let status_text = response.status().canonical_reason().unwrap_or("").to_string();
+
+                let mut headers = HashMap::new();
+                for (key, value) in response.headers() {
+                    if let Ok(v) = value.to_str() {
+                        headers.insert(key.to_string(), v.to_string());
+                    }
+                }
+
+                let body = response.bytes().await.unwrap_or_default().to_vec();
+
+                // Store response
+                let mut id_guard = NEXT_RESPONSE_ID.lock().unwrap();
+                let response_id = *id_guard;
+                *id_guard += 1;
+                drop(id_guard);
+
+                FETCH_RESPONSES.lock().unwrap().insert(response_id, FetchResponse {
+                    status,
+                    status_text,
+                    headers,
+                    body,
+                });
+
+                // Return response handle
+                let result_bits = (response_id as f64).to_bits();
+                queue_promise_resolution(promise_ptr, true, result_bits);
+            }
+            Err(e) => {
+                let err_msg = format!("Fetch error: {}", e);
+                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                let err_bits = JSValue::pointer(err_str as *const u8).bits();
+                queue_promise_resolution(promise_ptr, false, err_bits);
+            }
+        }
+    });
+
+    promise
+}
+
 /// Get response status code
 /// response.status -> number
 #[no_mangle]
