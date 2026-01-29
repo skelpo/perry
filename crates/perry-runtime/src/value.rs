@@ -283,15 +283,39 @@ pub extern "C" fn js_nanbox_is_pointer(value: f64) -> bool {
 }
 
 /// Extract a pointer from a NaN-boxed f64 value.
+/// Also handles raw pointer bits (bitcast from i64) for backward compatibility.
 /// Returns the pointer as i64.
 #[no_mangle]
 pub extern "C" fn js_nanbox_get_pointer(value: f64) -> i64 {
-    let jsval = JSValue::from_bits(value.to_bits());
+    let bits = value.to_bits();
+    let jsval = JSValue::from_bits(bits);
+
+    // First check for properly NaN-boxed pointers (with POINTER_TAG)
     if jsval.is_pointer() {
-        jsval.as_pointer::<u8>() as i64
-    } else {
-        0
+        return jsval.as_pointer::<u8>() as i64;
     }
+
+    // Check for raw pointer bits (from bitcast, not NaN-boxed)
+    // Raw pointers on 64-bit systems typically:
+    // - Have non-zero value
+    // - Are in the range of valid heap addresses (positive, < 2^47)
+    // - Are NOT valid normal f64 numbers (their bit pattern as f64 gives tiny denormalized numbers)
+    //
+    // The key insight: if the bits represent a valid pointer-sized integer
+    // that doesn't match any NaN-box tag and is in valid pointer range,
+    // it's likely a raw pointer that was bitcast to f64.
+    if bits != 0 && bits <= POINTER_MASK {
+        // Check if the upper bits don't match any NaN-box tag
+        let upper = bits >> 48;
+        // Our NaN-box tags use 0x7FFC-0x7FFF
+        // Valid f64 NaN uses 0x7FF8
+        // If upper bits are 0 or a valid pointer address prefix, treat as raw pointer
+        if upper == 0 || (upper > 0 && upper < 0x7FF0) {
+            return bits as i64;
+        }
+    }
+
+    0
 }
 
 /// Extract a string pointer from a NaN-boxed f64 value.
@@ -301,6 +325,39 @@ pub extern "C" fn js_nanbox_get_string_pointer(value: f64) -> i64 {
     let jsval = JSValue::from_bits(value.to_bits());
     if jsval.is_string() {
         jsval.as_string_ptr() as i64
+    } else {
+        0
+    }
+}
+
+/// Check if a NaN-boxed f64 value represents a string.
+#[no_mangle]
+pub extern "C" fn js_nanbox_is_string(value: f64) -> bool {
+    let jsval = JSValue::from_bits(value.to_bits());
+    jsval.is_string()
+}
+
+/// Compare two NaN-boxed f64 values for equality.
+/// Handles string comparison by comparing actual string contents.
+/// Returns 1 if equal, 0 if not.
+#[no_mangle]
+pub extern "C" fn js_jsvalue_equals(a: f64, b: f64) -> i32 {
+    let a_val = JSValue::from_bits(a.to_bits());
+    let b_val = JSValue::from_bits(b.to_bits());
+
+    // If both are strings, compare their contents
+    if a_val.is_string() && b_val.is_string() {
+        let a_str = a_val.as_string_ptr();
+        let b_str = b_val.as_string_ptr();
+        if crate::string::js_string_equals(a_str, b_str) {
+            return 1;
+        }
+        return 0;
+    }
+
+    // Otherwise, compare bits directly (works for numbers, null, undefined, etc.)
+    if a.to_bits() == b.to_bits() {
+        1
     } else {
         0
     }

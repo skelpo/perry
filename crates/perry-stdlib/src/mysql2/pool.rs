@@ -31,14 +31,13 @@ pub unsafe extern "C" fn js_mysql2_create_pool(config: JSValue) -> Handle {
     let mysql_config = parse_mysql_config(config);
     let url = mysql_config.to_url();
 
-    // Create pool with default options
-    // Pools connect lazily, so we can create it synchronously
-    let pool = crate::common::block_on(async {
-        MySqlPoolOptions::new()
-            .max_connections(10)
-            .connect(&url)
-            .await
-    });
+    // Create pool with lazy connection using the tokio runtime context
+    // We need to enter the runtime context for connect_lazy to work
+    let _guard = crate::common::runtime().enter();
+
+    let pool = MySqlPoolOptions::new()
+        .max_connections(10)
+        .connect_lazy(&url);
 
     match pool {
         Ok(pool) => register_handle(MysqlPoolHandle::new(pool)),

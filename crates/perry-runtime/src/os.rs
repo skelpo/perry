@@ -137,6 +137,28 @@ pub extern "C" fn js_process_cwd() -> *mut StringHeader {
     js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
 }
 
+/// Get command line arguments as an array of strings
+/// Returns: string[] (array of NaN-boxed string pointers)
+#[no_mangle]
+pub extern "C" fn js_process_argv() -> *mut ArrayHeader {
+    use crate::array::{js_array_alloc, js_array_push_f64};
+    use crate::value::js_nanbox_string;
+
+    let args: Vec<String> = std::env::args().collect();
+    let arr = js_array_alloc(args.len() as u32);
+
+    let mut result = arr;
+    for arg in args {
+        let bytes = arg.as_bytes();
+        let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32);
+        // NaN-box the string pointer so it's properly tagged
+        let nanboxed = js_nanbox_string(str_ptr as i64);
+        result = js_array_push_f64(result, nanboxed);
+    }
+
+    result
+}
+
 /// Get the operating system name
 /// Returns: "Darwin", "Linux", "Windows_NT", etc.
 #[no_mangle]

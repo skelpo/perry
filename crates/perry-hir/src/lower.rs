@@ -4097,6 +4097,17 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
             }
         }
         ast::Expr::Member(member) => {
+            // Check if this is process.argv access
+            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                if obj_ident.sym.as_ref() == "process" {
+                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                        if prop_ident.sym.as_ref() == "argv" {
+                            return Ok(Expr::ProcessArgv);
+                        }
+                    }
+                }
+            }
+
             // Check if this is a process.env.VARNAME access
             if let ast::Expr::Member(inner_member) = member.obj.as_ref() {
                 if let ast::Expr::Ident(obj_ident) = inner_member.obj.as_ref() {

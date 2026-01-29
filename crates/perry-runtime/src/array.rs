@@ -269,6 +269,25 @@ pub extern "C" fn js_array_includes_f64(arr: *const ArrayHeader, value: f64) -> 
     if js_array_indexOf_f64(arr, value) >= 0 { 1 } else { 0 }
 }
 
+/// Check if an array includes a value using deep equality comparison.
+/// This handles NaN-boxed strings by comparing string contents.
+/// Returns 1 if found, 0 if not.
+#[no_mangle]
+pub extern "C" fn js_array_includes_jsvalue(arr: *const ArrayHeader, value: f64) -> i32 {
+    unsafe {
+        let length = (*arr).length;
+        let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+
+        for i in 0..length as usize {
+            let element = *elements_ptr.add(i);
+            if crate::value::js_jsvalue_equals(element, value) == 1 {
+                return 1;
+            }
+        }
+        0
+    }
+}
+
 /// Splice an array - removes elements and optionally inserts new ones
 /// start: starting index (can be negative for from-end)
 /// delete_count: number of elements to delete

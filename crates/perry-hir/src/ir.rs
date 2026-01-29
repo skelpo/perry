@@ -637,6 +637,8 @@ pub enum Expr {
     ProcessUptime,
     // Process current working directory: process.cwd() -> string
     ProcessCwd,
+    // Process command line arguments: process.argv -> string[]
+    ProcessArgv,
 
     // File system operations
     FsReadFileSync(Box<Expr>),           // fs.readFileSync(path) -> string

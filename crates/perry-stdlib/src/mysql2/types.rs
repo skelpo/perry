@@ -46,6 +46,17 @@ impl MySqlConfig {
 
 /// Extract a Rust String from a JSValue that contains a string pointer
 unsafe fn jsvalue_to_string(value: JSValue) -> Option<String> {
+    // Check for NaN-boxed string (STRING_TAG = 0x7FFF)
+    if value.is_string() {
+        let ptr = value.as_string_ptr();
+        if !ptr.is_null() {
+            let len = (*ptr).length as usize;
+            let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+            let bytes = std::slice::from_raw_parts(data_ptr, len);
+            return Some(String::from_utf8_lossy(bytes).to_string());
+        }
+    }
+    // Also check for raw pointer (POINTER_TAG = 0x7FFD) pointing to a string
     if value.is_pointer() {
         let ptr = value.as_pointer() as *const StringHeader;
         if !ptr.is_null() {
@@ -60,12 +71,9 @@ unsafe fn jsvalue_to_string(value: JSValue) -> Option<String> {
 
 /// Convert a JSValue config object to MySqlConfig
 ///
-/// Expected object layout (based on property order in object literal):
-/// - field 0: host (string)
-/// - field 1: port (number)
-/// - field 2: user (string)
-/// - field 3: password (string)
-/// - field 4: database (string, optional)
+/// Supports two formats:
+/// 1. URI format: { uri: "mysql://user:pass@host:port/database" }
+/// 2. Individual fields: { host, port, user, password, database }
 ///
 /// # Safety
 /// The config must be a valid JSValue representing an object
@@ -82,10 +90,30 @@ pub unsafe fn parse_mysql_config(config: JSValue) -> MySqlConfig {
         return result;
     }
 
-    // Extract host (field 0)
-    let host_val = js_object_get_field(obj_ptr, 0);
-    if let Some(host) = jsvalue_to_string(host_val) {
-        result.host = host;
+    // Try to get the URI field by checking each field
+    // The object might have fields in different orders depending on how it was created
+    let field_count = (*obj_ptr).field_count;
+
+    for i in 0..field_count {
+        let field = js_object_get_field(obj_ptr, i);
+
+        if let Some(field_str) = jsvalue_to_string(field) {
+            if field_str.starts_with("mysql://") {
+                // Found the URI
+                if let Some(parsed) = parse_mysql_uri(&field_str) {
+                    return parsed;
+                }
+            }
+        }
+    }
+
+    // If no URI found, fall back to individual fields
+    let first_field = js_object_get_field(obj_ptr, 0);
+    if let Some(host_str) = jsvalue_to_string(first_field) {
+        if !host_str.starts_with("mysql://") {
+            // It's the host field (old format)
+            result.host = host_str;
+        }
     }
 
     // Extract port (field 1)
@@ -115,6 +143,50 @@ pub unsafe fn parse_mysql_config(config: JSValue) -> MySqlConfig {
     }
 
     result
+}
+
+/// Parse a MySQL connection URI into MySqlConfig
+/// Format: mysql://user:password@host:port/database
+fn parse_mysql_uri(uri: &str) -> Option<MySqlConfig> {
+    let uri = uri.strip_prefix("mysql://")?;
+
+    // Split by @ to separate credentials from host
+    let (credentials, host_part) = if let Some(idx) = uri.rfind('@') {
+        (&uri[..idx], &uri[idx + 1..])
+    } else {
+        ("", uri)
+    };
+
+    // Parse credentials (user:password)
+    let (user, password) = if let Some(idx) = credentials.find(':') {
+        (credentials[..idx].to_string(), credentials[idx + 1..].to_string())
+    } else {
+        (credentials.to_string(), String::new())
+    };
+
+    // Parse host:port/database
+    let (host_port, database) = if let Some(idx) = host_part.find('/') {
+        (&host_part[..idx], Some(host_part[idx + 1..].to_string()))
+    } else {
+        (host_part, None)
+    };
+
+    // Parse host:port
+    let (host, port) = if let Some(idx) = host_port.rfind(':') {
+        let port_str = &host_port[idx + 1..];
+        let port = port_str.parse().unwrap_or(3306);
+        (host_port[..idx].to_string(), port)
+    } else {
+        (host_port.to_string(), 3306)
+    };
+
+    Some(MySqlConfig {
+        host,
+        port,
+        user,
+        password,
+        database,
+    })
 }
 
 /// Convert a MySQL row to a JS object (RowDataPacket)
