@@ -37,6 +37,48 @@ const INT32_MASK: u64 = 0x0000_0000_FFFF_FFFF;
 /// String pointer tag: 0x7FFF_XXXX_XXXX_XXXX (48 bits for string pointer)
 const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
 
+/// JS Handle tag: 0x7FFB_XXXX_XXXX_XXXX (48 bits for handle ID)
+/// This is used by perry-jsruntime to reference V8 objects
+const JS_HANDLE_TAG: u64 = 0x7FFB_0000_0000_0000;
+const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
+
+/// Function pointers for JS handle operations (set by perry-jsruntime)
+/// These allow the unified functions to dispatch to JS runtime when needed
+use std::sync::atomic::{AtomicPtr, Ordering};
+
+type JsHandleArrayGetFn = extern "C" fn(f64, i32) -> f64;
+type JsHandleArrayLengthFn = extern "C" fn(f64) -> i32;
+type JsHandleObjectGetPropertyFn = extern "C" fn(f64, *const i8, usize) -> f64;
+
+static JS_HANDLE_ARRAY_GET: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static JS_HANDLE_ARRAY_LENGTH: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static JS_HANDLE_OBJECT_GET_PROPERTY: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Set the JS handle array get function (called by perry-jsruntime)
+#[no_mangle]
+pub extern "C" fn js_set_handle_array_get(func: JsHandleArrayGetFn) {
+    JS_HANDLE_ARRAY_GET.store(func as *mut (), Ordering::SeqCst);
+}
+
+/// Set the JS handle array length function (called by perry-jsruntime)
+#[no_mangle]
+pub extern "C" fn js_set_handle_array_length(func: JsHandleArrayLengthFn) {
+    JS_HANDLE_ARRAY_LENGTH.store(func as *mut (), Ordering::SeqCst);
+}
+
+/// Set the JS handle object get property function (called by perry-jsruntime)
+#[no_mangle]
+pub extern "C" fn js_set_handle_object_get_property(func: JsHandleObjectGetPropertyFn) {
+    JS_HANDLE_OBJECT_GET_PROPERTY.store(func as *mut (), Ordering::SeqCst);
+}
+
+/// Check if a NaN-boxed value is a JS handle
+#[inline]
+pub fn is_js_handle(value: f64) -> bool {
+    let bits = value.to_bits();
+    (bits & TAG_MASK) == JS_HANDLE_TAG
+}
+
 /// A JavaScript value using NaN-boxing representation
 #[derive(Clone, Copy)]
 #[repr(transparent)]
@@ -284,6 +326,7 @@ pub extern "C" fn js_nanbox_is_pointer(value: f64) -> bool {
 
 /// Extract a pointer from a NaN-boxed f64 value.
 /// Also handles raw pointer bits (bitcast from i64) for backward compatibility.
+/// Handles both POINTER_TAG and STRING_TAG.
 /// Returns the pointer as i64.
 #[no_mangle]
 pub extern "C" fn js_nanbox_get_pointer(value: f64) -> i64 {
@@ -293,6 +336,11 @@ pub extern "C" fn js_nanbox_get_pointer(value: f64) -> i64 {
     // First check for properly NaN-boxed pointers (with POINTER_TAG)
     if jsval.is_pointer() {
         return jsval.as_pointer::<u8>() as i64;
+    }
+
+    // Also check for string pointers (with STRING_TAG)
+    if jsval.is_string() {
+        return jsval.as_string_ptr() as i64;
     }
 
     // Check for raw pointer bits (from bitcast, not NaN-boxed)
@@ -337,6 +385,39 @@ pub extern "C" fn js_nanbox_is_string(value: f64) -> bool {
     jsval.is_string()
 }
 
+/// Convert a NaN-boxed f64 value to a string pointer.
+/// Handles all value types: strings (extract pointer), numbers (convert), etc.
+#[no_mangle]
+pub extern "C" fn js_jsvalue_to_string(value: f64) -> *mut crate::string::StringHeader {
+    let jsval = JSValue::from_bits(value.to_bits());
+
+    if jsval.is_string() {
+        // Already a string - extract and return the pointer
+        jsval.as_string_ptr() as *mut crate::string::StringHeader
+    } else if jsval.is_undefined() {
+        crate::string::js_string_from_bytes(b"undefined".as_ptr(), 9)
+    } else if jsval.is_null() {
+        crate::string::js_string_from_bytes(b"null".as_ptr(), 4)
+    } else if jsval.is_bool() {
+        if jsval.as_bool() {
+            crate::string::js_string_from_bytes(b"true".as_ptr(), 4)
+        } else {
+            crate::string::js_string_from_bytes(b"false".as_ptr(), 5)
+        }
+    } else if jsval.is_int32() {
+        // Convert int32 to string
+        let n = jsval.as_int32();
+        let s = n.to_string();
+        crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32)
+    } else if jsval.is_pointer() {
+        // Object/array - return "[object Object]" for now
+        crate::string::js_string_from_bytes(b"[object Object]".as_ptr(), 15)
+    } else {
+        // Regular number - use js_number_to_string
+        crate::string::js_number_to_string(value)
+    }
+}
+
 /// Compare two NaN-boxed f64 values for equality.
 /// Handles string comparison by comparing actual string contents.
 /// Returns 1 if equal, 0 if not.
@@ -361,6 +442,112 @@ pub extern "C" fn js_jsvalue_equals(a: f64, b: f64) -> i32 {
     } else {
         0
     }
+}
+
+/// Unified array element access that handles both JS handle arrays and native arrays.
+/// This is called from compiled code when the array type is not known at compile time.
+#[no_mangle]
+pub extern "C" fn js_dynamic_array_get(arr_value: f64, index: i32) -> f64 {
+    // Check if this is a JS handle
+    if is_js_handle(arr_value) {
+        // Try to use the JS runtime function if it's been registered
+        let func_ptr = JS_HANDLE_ARRAY_GET.load(Ordering::SeqCst);
+        if !func_ptr.is_null() {
+            let func: JsHandleArrayGetFn = unsafe { std::mem::transmute(func_ptr) };
+            return func(arr_value, index);
+        }
+        // JS runtime not available - return undefined
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+
+    // Not a JS handle - it's a native array pointer
+    let ptr = js_nanbox_get_pointer(arr_value);
+    if ptr == 0 {
+        // Invalid pointer - return undefined
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+
+    // Call the native array get function
+    let result_bits = crate::array::js_array_get_jsvalue(ptr as *const crate::array::ArrayHeader, index as u32);
+    f64::from_bits(result_bits)
+}
+
+/// Unified array length access that handles both JS handle arrays and native arrays.
+#[no_mangle]
+pub extern "C" fn js_dynamic_array_length(arr_value: f64) -> i32 {
+    // Check if this is a JS handle
+    if is_js_handle(arr_value) {
+        // Try to use the JS runtime function if it's been registered
+        let func_ptr = JS_HANDLE_ARRAY_LENGTH.load(Ordering::SeqCst);
+        if !func_ptr.is_null() {
+            let func: JsHandleArrayLengthFn = unsafe { std::mem::transmute(func_ptr) };
+            return func(arr_value);
+        }
+        // JS runtime not available - return 0
+        return 0;
+    }
+
+    // Not a JS handle - extract the pointer
+    let ptr = js_nanbox_get_pointer(arr_value);
+    if ptr == 0 {
+        return 0;
+    }
+
+    crate::array::js_array_length(ptr as *const crate::array::ArrayHeader) as i32
+}
+
+/// Unified object property access that handles both JS handle objects and native objects.
+#[no_mangle]
+pub unsafe extern "C" fn js_dynamic_object_get_property(
+    obj_value: f64,
+    property_name_ptr: *const i8,
+    property_name_len: usize,
+) -> f64 {
+    // Check if this is a JS handle
+    if is_js_handle(obj_value) {
+        // Try to use the JS runtime function if it's been registered
+        let func_ptr = JS_HANDLE_OBJECT_GET_PROPERTY.load(Ordering::SeqCst);
+        if !func_ptr.is_null() {
+            let func: JsHandleObjectGetPropertyFn = unsafe { std::mem::transmute(func_ptr) };
+            return func(obj_value, property_name_ptr, property_name_len);
+        }
+        // JS runtime not available - return undefined
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+
+    // Not a JS handle - it's a native object pointer
+    let ptr = js_nanbox_get_pointer(obj_value);
+    if ptr == 0 {
+        // Invalid pointer - return undefined
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+
+    // Get the key string
+    let name_slice = if property_name_ptr.is_null() {
+        return f64::from_bits(TAG_UNDEFINED);
+    } else if property_name_len > 0 {
+        std::slice::from_raw_parts(property_name_ptr as *const u8, property_name_len)
+    } else {
+        // Null-terminated C string
+        std::ffi::CStr::from_ptr(property_name_ptr).to_bytes()
+    };
+
+    let property_name = match std::str::from_utf8(name_slice) {
+        Ok(s) => s,
+        Err(_) => return f64::from_bits(TAG_UNDEFINED),
+    };
+
+    // Create a Perry string for the key
+    let key_ptr = crate::string::js_string_from_bytes(
+        property_name.as_ptr(),
+        property_name.len() as u32,
+    );
+
+    // Call native object property access
+    crate::object::js_object_get_field_by_name_f64(
+        ptr as *const crate::object::ObjectHeader,
+        key_ptr,
+    )
 }
 
 #[cfg(test)]

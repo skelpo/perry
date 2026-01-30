@@ -241,7 +241,8 @@ pub extern "C" fn js_console_log_spread(arr_ptr: *const crate::array::ArrayHeade
         let mut parts: Vec<String> = Vec::with_capacity(length);
         for i in 0..length {
             let value = *data_ptr.add(i);
-            let jsval = JSValue::from_bits(value.to_bits());
+            let bits = value.to_bits();
+            let jsval = JSValue::from_bits(bits);
 
             let formatted = if jsval.is_undefined() {
                 "undefined".to_string()

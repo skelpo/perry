@@ -1,7 +1,8 @@
 //! Type conversions between MySQL types and JSValue
 
 use perry_runtime::{
-    js_object_alloc, js_object_get_field, js_object_set_field,
+    js_array_alloc, js_array_push,
+    js_object_alloc, js_object_get_field, js_object_set_field, js_object_set_keys,
     js_string_from_bytes, JSValue, ObjectHeader, StringHeader,
 };
 use sqlx::mysql::MySqlRow;
@@ -197,10 +198,23 @@ pub fn row_to_js_object(row: &MySqlRow) -> *mut ObjectHeader {
     // Class ID 0 for anonymous object, field count = number of columns
     let obj = js_object_alloc(0, columns.len() as u32);
 
-    for (i, _col) in columns.iter().enumerate() {
+    // Create keys array for property name lookup
+    let mut keys_array = js_array_alloc(columns.len() as u32);
+
+    for (i, col) in columns.iter().enumerate() {
+        // Set the field value
         let value = column_value_to_jsvalue(row, i);
         js_object_set_field(obj, i as u32, value);
+
+        // Add column name to keys array (NaN-boxed string pointer)
+        let col_name = col.name();
+        let name_ptr = js_string_from_bytes(col_name.as_ptr(), col_name.len() as u32);
+        let name_jsval = JSValue::string_ptr(name_ptr);
+        keys_array = js_array_push(keys_array, name_jsval);
     }
+
+    // Attach keys array to object for property name lookup
+    js_object_set_keys(obj, keys_array);
 
     obj
 }
@@ -273,18 +287,30 @@ pub fn column_to_field_packet(col: &sqlx::mysql::MySqlColumn) -> *mut ObjectHead
     // 2: length (number)
     let obj = js_object_alloc(0, 3);
 
+    // Create keys array for property name lookup
+    let mut keys_array = js_array_alloc(3);
+
     // Set name
     let name = col.name();
     let name_ptr = js_string_from_bytes(name.as_ptr(), name.len() as u32);
     js_object_set_field(obj, 0, JSValue::string_ptr(name_ptr));
+    let key0 = js_string_from_bytes("name".as_ptr(), 4);
+    keys_array = js_array_push(keys_array, JSValue::string_ptr(key0));
 
     // Set type (as string for now)
     let type_name = col.type_info().name();
     let type_ptr = js_string_from_bytes(type_name.as_ptr(), type_name.len() as u32);
     js_object_set_field(obj, 1, JSValue::string_ptr(type_ptr));
+    let key1 = js_string_from_bytes("type".as_ptr(), 4);
+    keys_array = js_array_push(keys_array, JSValue::string_ptr(key1));
 
     // Set length (0 for now - would need to extract from column metadata)
     js_object_set_field(obj, 2, JSValue::number(0.0));
+    let key2 = js_string_from_bytes("length".as_ptr(), 6);
+    keys_array = js_array_push(keys_array, JSValue::string_ptr(key2));
+
+    // Attach keys to object
+    js_object_set_keys(obj, keys_array);
 
     obj
 }

@@ -31,6 +31,11 @@ pub extern "C" fn js_runtime_init() {
     let _ = get_tokio_runtime();
     // Force initialization of the JS runtime on this thread
     ensure_runtime_initialized();
+
+    // Register JS handle functions with perry-runtime so the unified functions can use them
+    perry_runtime::js_set_handle_array_get(js_handle_array_get);
+    perry_runtime::js_set_handle_array_length(js_handle_array_length);
+    perry_runtime::js_set_handle_object_get_property(js_handle_object_get_property);
 }
 
 /// Shutdown the JavaScript runtime and release resources
@@ -428,11 +433,60 @@ pub unsafe extern "C" fn js_register_native_function(
     // TODO: Implement proper native function registration
 }
 
-/// Get a property from a JavaScript object
+/// Get an element from a JavaScript array by index
+/// array_handle: NaN-boxed value containing a JS handle to an array
+/// index: The array index
+/// Returns the element value as a NaN-boxed f64
+#[no_mangle]
+pub extern "C" fn js_handle_array_get(array_handle: f64, index: i32) -> f64 {
+    with_runtime(|state| {
+        let scope = &mut state.runtime.handle_scope();
+
+        // Convert the handle to a V8 value
+        let arr_val = native_to_v8(scope, array_handle);
+        if !arr_val.is_array() {
+            log::error!("Value is not an array");
+            return f64::from_bits(0x7FFC_0000_0000_0001); // undefined
+        }
+
+        let arr = v8::Local::<v8::Array>::try_from(arr_val).unwrap();
+
+        // Get the element
+        let elem = match arr.get_index(scope, index as u32) {
+            Some(v) => v,
+            None => return f64::from_bits(0x7FFC_0000_0000_0001),
+        };
+
+        v8_to_native(scope, elem)
+    })
+}
+
+/// Get the length of a JavaScript array
+/// array_handle: NaN-boxed value containing a JS handle to an array
+/// Returns the length as i32
+#[no_mangle]
+pub extern "C" fn js_handle_array_length(array_handle: f64) -> i32 {
+    with_runtime(|state| {
+        let scope = &mut state.runtime.handle_scope();
+
+        // Convert the handle to a V8 value
+        let arr_val = native_to_v8(scope, array_handle);
+        if !arr_val.is_array() {
+            log::error!("Value is not an array");
+            return 0;
+        }
+
+        let arr = v8::Local::<v8::Array>::try_from(arr_val).unwrap();
+        arr.length() as i32
+    })
+}
+
+/// Get a property from a JavaScript object (for JS handle objects)
+/// This is called by js_dynamic_object_get_property in perry-runtime when a JS handle is detected
 /// object_ptr: NaN-boxed value containing a JS handle
 /// Returns the property value as a NaN-boxed f64
 #[no_mangle]
-pub unsafe extern "C" fn js_get_property(
+pub extern "C" fn js_handle_object_get_property(
     object_ptr: f64,
     property_name_ptr: *const i8,
     property_name_len: usize,
@@ -440,9 +494,9 @@ pub unsafe extern "C" fn js_get_property(
     let name_slice = if property_name_ptr.is_null() {
         return f64::from_bits(0x7FFC_0000_0000_0001); // undefined
     } else if property_name_len > 0 {
-        std::slice::from_raw_parts(property_name_ptr as *const u8, property_name_len)
+        unsafe { std::slice::from_raw_parts(property_name_ptr as *const u8, property_name_len) }
     } else {
-        CStr::from_ptr(property_name_ptr).to_bytes()
+        unsafe { CStr::from_ptr(property_name_ptr).to_bytes() }
     };
 
     let property_name = match std::str::from_utf8(name_slice) {

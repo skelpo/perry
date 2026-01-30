@@ -3027,6 +3027,42 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                 }
                             }
 
+                            // Check for Object static methods
+                            if obj_name == "Object" {
+                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                    let method_name = method_ident.sym.as_ref();
+                                    match method_name {
+                                        "keys" => {
+                                            let obj = args.get(0).cloned().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ObjectKeys(Box::new(obj)));
+                                        }
+                                        "values" => {
+                                            let obj = args.get(0).cloned().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ObjectValues(Box::new(obj)));
+                                        }
+                                        "entries" => {
+                                            let obj = args.get(0).cloned().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ObjectEntries(Box::new(obj)));
+                                        }
+                                        _ => {} // Fall through to generic handling
+                                    }
+                                }
+                            }
+
+                            // Check for Array static methods
+                            if obj_name == "Array" {
+                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                    let method_name = method_ident.sym.as_ref();
+                                    match method_name {
+                                        "isArray" => {
+                                            let value = args.get(0).cloned().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ArrayIsArray(Box::new(value)));
+                                        }
+                                        _ => {} // Fall through to generic handling
+                                    }
+                                }
+                            }
+
                             // Check for net module methods
                             let is_net_module = obj_name == "net" ||
                                 ctx.lookup_builtin_module_alias(&obj_name) == Some("net");
@@ -3646,7 +3682,12 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                         }
                                         "slice" => {
                                             // arr.slice(start, end?) - returns new array
-                                            if args.len() >= 1 {
+                                            // Only convert to ArraySlice if we KNOW it's an Array type
+                                            // (Type::Any could be a string, which has its own .slice() method)
+                                            let is_definitely_array = ctx.lookup_local_type(&arr_name)
+                                                .map(|ty| matches!(ty, Type::Array(_)))
+                                                .unwrap_or(false);
+                                            if is_definitely_array && args.len() >= 1 {
                                                 let mut args_iter = args.into_iter();
                                                 let start = args_iter.next().unwrap();
                                                 let end = args_iter.next();
@@ -3656,6 +3697,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                     end: end.map(Box::new),
                                                 });
                                             }
+                                            // Fall through to normal Call handling for strings or unknown types
                                         }
                                         "splice" => {
                                             // arr.splice(start, deleteCount?, ...items) - returns deleted elements
@@ -3972,6 +4014,84 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     return Err(anyhow!("isFinite requires one argument"));
                                 }
                             }
+                            "fetch" => {
+                                // Handle fetch(url) and fetch(url, options)
+                                // Extract URL (first argument)
+                                let url = if args.len() >= 1 {
+                                    args.remove(0)
+                                } else {
+                                    return Err(anyhow!("fetch requires at least a URL argument"));
+                                };
+
+                                // Check if there's an options object (second argument)
+                                if args.len() >= 1 {
+                                    // Extract options from the object literal
+                                    // We need to get the original AST to extract the object properties
+                                    if let Some(options_arg) = call.args.get(1) {
+                                        if let ast::Expr::Object(obj) = &*options_arg.expr {
+                                            // Extract method, body, and headers from options
+                                            let mut method = Expr::String("GET".to_string());
+                                            let mut body = Expr::Undefined;
+                                            let mut headers_obj: Vec<(String, Expr)> = Vec::new();
+
+                                            for prop in &obj.props {
+                                                if let ast::PropOrSpread::Prop(prop) = prop {
+                                                    if let ast::Prop::KeyValue(kv) = prop.as_ref() {
+                                                        let key = match &kv.key {
+                                                            ast::PropName::Ident(ident) => ident.sym.to_string(),
+                                                            ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                                            _ => continue,
+                                                        };
+                                                        match key.as_str() {
+                                                            "method" => {
+                                                                method = lower_expr(ctx, &kv.value)?;
+                                                            }
+                                                            "body" => {
+                                                                body = lower_expr(ctx, &kv.value)?;
+                                                            }
+                                                            "headers" => {
+                                                                // Extract headers object
+                                                                if let ast::Expr::Object(headers_ast) = &*kv.value {
+                                                                    for hprop in &headers_ast.props {
+                                                                        if let ast::PropOrSpread::Prop(hprop) = hprop {
+                                                                            if let ast::Prop::KeyValue(hkv) = hprop.as_ref() {
+                                                                                let hkey = match &hkv.key {
+                                                                                    ast::PropName::Ident(ident) => ident.sym.to_string(),
+                                                                                    ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                                                                    _ => continue,
+                                                                                };
+                                                                                let hval = lower_expr(ctx, &hkv.value)?;
+                                                                                headers_obj.push((hkey, hval));
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // Create a FetchWithOptions expression
+                                            return Ok(Expr::FetchWithOptions {
+                                                url: Box::new(url),
+                                                method: Box::new(method),
+                                                body: Box::new(body),
+                                                headers: headers_obj,
+                                            });
+                                        }
+                                    }
+                                }
+
+                                // Simple fetch(url) with no options - use GET
+                                return Ok(Expr::FetchWithOptions {
+                                    url: Box::new(url),
+                                    method: Box::new(Expr::String("GET".to_string())),
+                                    body: Box::new(Expr::Undefined),
+                                    headers: Vec::new(),
+                                });
+                            }
                             _ => {} // Fall through to generic handling
                         }
 
@@ -4166,6 +4286,29 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                         if prop_ident.sym.as_ref() == "EOL" {
                             return Ok(Expr::OsEOL);
                         }
+                    }
+                }
+            }
+
+            // Check for native instance property access (e.g., response.status, response.ok)
+            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                let obj_name = obj_ident.sym.to_string();
+                // Clone module_name early to avoid borrow issues
+                let native_instance = ctx.lookup_native_instance(&obj_name)
+                    .map(|(m, _c)| m.to_string());
+                if let Some(module_name) = native_instance {
+                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                        let property_name = prop_ident.sym.to_string();
+                        // For properties that map to FFI functions, generate a NativeMethodCall
+                        // with no args (property getter)
+                        let object_expr = lower_expr(ctx, &member.obj)?;
+                        return Ok(Expr::NativeMethodCall {
+                            module: module_name,
+                            class_name: None,
+                            object: Some(Box::new(object_expr)),
+                            method: property_name,
+                            args: Vec::new(),
+                        });
                     }
                 }
             }
@@ -4564,11 +4707,12 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                 let param_name = get_pat_name(param)?;
                 let param_default = get_param_default(ctx, param)?;
                 let is_rest = is_rest_param(param);
-                let param_id = ctx.define_local(param_name.clone(), Type::Any);
+                let param_ty = get_pat_type(param, ctx);
+                let param_id = ctx.define_local(param_name.clone(), param_ty.clone());
                 params.push(Param {
                     id: param_id,
                     name: param_name,
-                    ty: Type::Any,
+                    ty: param_ty,
                     default: param_default,
                     is_rest,
                 });
@@ -5125,6 +5269,34 @@ fn get_pat_name(pat: &ast::Pat) -> Result<String> {
             Ok(format!("__obj_destruct_{}", id))
         }
         _ => Err(anyhow!("Unsupported pattern")),
+    }
+}
+
+/// Extract the type annotation from a Pat (for arrow function parameters)
+fn get_pat_type(pat: &ast::Pat, ctx: &LoweringContext) -> Type {
+    match pat {
+        ast::Pat::Ident(ident) => {
+            ident.type_ann.as_ref()
+                .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, Some(ctx)))
+                .unwrap_or(Type::Any)
+        }
+        ast::Pat::Assign(assign) => get_pat_type(&assign.left, ctx),
+        ast::Pat::Rest(rest) => {
+            rest.type_ann.as_ref()
+                .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, Some(ctx)))
+                .unwrap_or(Type::Any)
+        }
+        ast::Pat::Array(arr) => {
+            arr.type_ann.as_ref()
+                .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, Some(ctx)))
+                .unwrap_or(Type::Any)
+        }
+        ast::Pat::Object(obj) => {
+            obj.type_ann.as_ref()
+                .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, Some(ctx)))
+                .unwrap_or(Type::Any)
+        }
+        _ => Type::Any,
     }
 }
 
@@ -6127,6 +6299,32 @@ fn lower_var_decl_with_destructuring(
                 }
             }
 
+            // Check if this is assigning from fetch() or await fetch() - register as fetch Response
+            if let Some(init_expr) = &decl.init {
+                // Helper to check if an expression is a fetch call
+                fn is_fetch_call(expr: &ast::Expr) -> bool {
+                    if let ast::Expr::Call(call_expr) = expr {
+                        if let ast::Callee::Expr(callee_expr) = &call_expr.callee {
+                            if let ast::Expr::Ident(ident) = callee_expr.as_ref() {
+                                return ident.sym.as_ref() == "fetch";
+                            }
+                        }
+                    }
+                    false
+                }
+
+                // Check for: const response = fetch(url)
+                if is_fetch_call(init_expr) {
+                    ctx.register_native_instance(name.clone(), "fetch".to_string(), "Response".to_string());
+                }
+                // Check for: const response = await fetch(url)
+                else if let ast::Expr::Await(await_expr) = init_expr.as_ref() {
+                    if is_fetch_call(&await_expr.arg) {
+                        ctx.register_native_instance(name.clone(), "fetch".to_string(), "Response".to_string());
+                    }
+                }
+            }
+
             let init = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
             let id = ctx.define_local(name.clone(), ty.clone());
             result.push(Stmt::Let {
@@ -6813,7 +7011,13 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
         Expr::Undefined | Expr::BigInt(_) | Expr::This | Expr::FuncRef(_) |
         Expr::ClassRef(_) | Expr::ExternFuncRef { .. } | Expr::EnumMember { .. } |
         Expr::EnvGet(_) | Expr::ProcessUptime | Expr::ProcessCwd | Expr::NativeModuleRef(_) |
-        Expr::RegExp { .. } | Expr::ObjectKeys(_) => {}
+        Expr::RegExp { .. } => {}
+        Expr::ObjectKeys(obj) | Expr::ObjectValues(obj) | Expr::ObjectEntries(obj) => {
+            collect_local_refs_expr(obj, refs);
+        }
+        Expr::ArrayIsArray(value) => {
+            collect_local_refs_expr(value, refs);
+        }
         Expr::RegExpTest { regex, string } => {
             collect_local_refs_expr(regex, refs);
             collect_local_refs_expr(string, refs);
@@ -7433,7 +7637,13 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
         Expr::Object(_) | Expr::TypeOf(_) | Expr::InstanceOf { .. } |
         Expr::EnumMember { .. } | Expr::This | Expr::Null | Expr::Undefined |
         Expr::EnvGet(_) | Expr::ProcessUptime | Expr::ProcessCwd | Expr::NativeModuleRef(_) |
-        Expr::RegExp { .. } | Expr::ObjectKeys(_) => {}
+        Expr::RegExp { .. } => {}
+        Expr::ObjectKeys(obj) | Expr::ObjectValues(obj) | Expr::ObjectEntries(obj) => {
+            collect_assigned_locals_expr(obj, assigned);
+        }
+        Expr::ArrayIsArray(value) => {
+            collect_assigned_locals_expr(value, assigned);
+        }
         Expr::RegExpTest { regex, string } => {
             collect_assigned_locals_expr(regex, assigned);
             collect_assigned_locals_expr(string, assigned);

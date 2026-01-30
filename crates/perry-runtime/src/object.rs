@@ -232,6 +232,59 @@ pub extern "C" fn js_object_keys(obj: *const ObjectHeader) -> *mut ArrayHeader {
     }
 }
 
+/// Get the values of an object as an array
+/// Returns an array of the object's field values
+#[no_mangle]
+pub extern "C" fn js_object_values(obj: *const ObjectHeader) -> *mut ArrayHeader {
+    unsafe {
+        let field_count = (*obj).field_count as usize;
+        let result = crate::array::js_array_alloc(field_count as u32);
+
+        for i in 0..field_count {
+            let value = js_object_get_field(obj as *mut ObjectHeader, i as u32);
+            // Store the raw f64 bits (which may be NaN-boxed)
+            crate::array::js_array_push_f64(result, f64::from_bits(value.bits()));
+        }
+
+        result
+    }
+}
+
+/// Get the entries of an object as an array of [key, value] pairs
+/// Returns an array where each element is a 2-element array [key, value]
+#[no_mangle]
+pub extern "C" fn js_object_entries(obj: *const ObjectHeader) -> *mut ArrayHeader {
+    unsafe {
+        let keys = (*obj).keys_array;
+        let field_count = (*obj).field_count as usize;
+        let result = crate::array::js_array_alloc(field_count as u32);
+
+        for i in 0..field_count {
+            // Create a pair array [key, value]
+            let pair = crate::array::js_array_alloc(2);
+
+            // Get the key (from keys array if available)
+            if !keys.is_null() && (i as u32) < crate::array::js_array_length(keys) {
+                let key = crate::array::js_array_get_f64(keys, i as u32);
+                crate::array::js_array_push_f64(pair, key);
+            } else {
+                // No key available, use empty string
+                crate::array::js_array_push_f64(pair, 0.0);
+            }
+
+            // Get the value
+            let value = js_object_get_field(obj as *mut ObjectHeader, i as u32);
+            crate::array::js_array_push_f64(pair, f64::from_bits(value.bits()));
+
+            // Push the pair to result (NaN-box the array pointer)
+            let pair_boxed = crate::value::js_nanbox_pointer(pair as i64);
+            crate::array::js_array_push_f64(result, pair_boxed);
+        }
+
+        result
+    }
+}
+
 /// Check if a property exists in an object by its string key name
 /// Returns 1.0 if the property exists, 0.0 otherwise
 /// This implements the JavaScript 'in' operator: "key" in obj
@@ -476,6 +529,131 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
 
         0.0
     }
+}
+
+/// Call a method on an object with dynamic dispatch
+/// This is used for runtime method calls when the method cannot be resolved statically.
+/// object: NaN-boxed f64 containing an object pointer
+/// method_name_ptr: pointer to the method name string (raw bytes, not StringHeader)
+/// method_name_len: length of the method name
+/// args_ptr: pointer to array of f64 arguments
+/// args_len: number of arguments
+/// Returns the result as f64
+#[no_mangle]
+pub unsafe extern "C" fn js_call_method(
+    object: f64,
+    method_name_ptr: *const i8,
+    method_name_len: usize,
+    args_ptr: *const f64,
+    args_len: usize,
+) -> f64 {
+    // Get the method name
+    let method_name = if method_name_ptr.is_null() || method_name_len == 0 {
+        ""
+    } else {
+        let bytes = std::slice::from_raw_parts(method_name_ptr as *const u8, method_name_len);
+        std::str::from_utf8(bytes).unwrap_or("")
+    };
+
+    let jsval = JSValue::from_bits(object.to_bits());
+
+    // Handle common method calls
+    match method_name {
+        // Function.prototype.bind - returns the same function for native closures
+        // This is a simplification - real bind() creates a new function with bound 'this'
+        "bind" => {
+            // For native closures, we return the function as-is
+            // The 'this' binding is handled at the call site
+            return object;
+        }
+
+        // Common string methods on string values
+        "toString" => {
+            if jsval.is_string() {
+                return object;
+            } else if jsval.is_number() {
+                let n = jsval.as_number();
+                let s = if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+                    (n as i64).to_string()
+                } else {
+                    n.to_string()
+                };
+                let str_ptr = crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32);
+                return JSValue::string_ptr(str_ptr).bits() as f64;
+            } else if jsval.is_bool() {
+                let s = if jsval.as_bool() { "true" } else { "false" };
+                let str_ptr = crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32);
+                return JSValue::string_ptr(str_ptr).bits() as f64;
+            } else if jsval.is_undefined() {
+                let s = "undefined";
+                let str_ptr = crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32);
+                return JSValue::string_ptr(str_ptr).bits() as f64;
+            } else if jsval.is_null() {
+                let s = "null";
+                let str_ptr = crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32);
+                return JSValue::string_ptr(str_ptr).bits() as f64;
+            }
+        }
+
+        // Array methods - delegate to array runtime
+        "push" if jsval.is_pointer() => {
+            let arr = jsval.as_pointer::<crate::array::ArrayHeader>() as *mut crate::array::ArrayHeader;
+            if args_len > 0 && !args_ptr.is_null() {
+                let val = *args_ptr;
+                crate::array::js_array_push_f64(arr, val);
+            }
+            return crate::array::js_array_length(arr) as f64;
+        }
+        "pop" if jsval.is_pointer() => {
+            let arr = jsval.as_pointer::<crate::array::ArrayHeader>() as *mut crate::array::ArrayHeader;
+            return crate::array::js_array_pop_f64(arr);
+        }
+        "length" if jsval.is_pointer() => {
+            let arr = jsval.as_pointer::<crate::array::ArrayHeader>();
+            return crate::array::js_array_length(arr) as f64;
+        }
+
+        _ => {}
+    }
+
+    // If it's an object with a method stored as a closure in a field,
+    // try to find and call it
+    if jsval.is_pointer() {
+        let obj = jsval.as_pointer::<ObjectHeader>();
+        let keys = (*obj).keys_array;
+
+        if !keys.is_null() {
+            // Search for the method in the object's fields
+            let key_count = crate::array::js_array_length(keys) as usize;
+            let method_key = crate::string::js_string_from_bytes(
+                method_name.as_ptr(),
+                method_name.len() as u32,
+            );
+
+            for i in 0..key_count {
+                let key_val = crate::array::js_array_get(keys, i as u32);
+                if key_val.is_string() {
+                    let stored_key = key_val.as_pointer::<crate::StringHeader>();
+                    if crate::string::js_string_equals(method_key, stored_key) {
+                        // Found the method - get it and call it if it's a closure
+                        let field_val = js_object_get_field(obj as *mut _, i as u32);
+                        if field_val.is_pointer() {
+                            // Assume it's a closure and call it
+                            let closure = field_val.as_pointer::<crate::closure::ClosureHeader>();
+                            return crate::closure::js_call_value(
+                                f64::from_bits(field_val.bits()),
+                                args_ptr,
+                                args_len,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Method not found - return undefined
+    JSValue::undefined().bits() as f64
 }
 
 #[cfg(test)]

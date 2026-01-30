@@ -359,6 +359,63 @@ pub extern "C" fn js_string_equals(a: *const StringHeader, b: *const StringHeade
     true
 }
 
+/// Check if a string starts with a prefix
+#[no_mangle]
+pub extern "C" fn js_string_starts_with(s: *const StringHeader, prefix: *const StringHeader) -> i32 {
+    if s.is_null() || prefix.is_null() {
+        return 0;
+    }
+
+    let len = unsafe { (*s).length };
+    let prefix_len = unsafe { (*prefix).length };
+
+    if prefix_len > len {
+        return 0;
+    }
+
+    unsafe {
+        let data = string_data(s);
+        let prefix_data = string_data(prefix);
+
+        for i in 0..prefix_len as usize {
+            if *data.add(i) != *prefix_data.add(i) {
+                return 0;
+            }
+        }
+    }
+
+    1
+}
+
+/// Check if a string ends with a suffix
+#[no_mangle]
+pub extern "C" fn js_string_ends_with(s: *const StringHeader, suffix: *const StringHeader) -> i32 {
+    if s.is_null() || suffix.is_null() {
+        return 0;
+    }
+
+    let len = unsafe { (*s).length };
+    let suffix_len = unsafe { (*suffix).length };
+
+    if suffix_len > len {
+        return 0;
+    }
+
+    unsafe {
+        let data = string_data(s);
+        let suffix_data = string_data(suffix);
+        let start = len - suffix_len;
+
+        for i in 0..suffix_len as usize {
+            if *data.add(start as usize + i) != *suffix_data.add(i) {
+                return 0;
+            }
+        }
+    }
+
+    1
+}
+
 /// Get character at index (returns char code, -1 if out of bounds)
 #[no_mangle]
 pub extern "C" fn js_string_char_code_at(s: *const StringHeader, index: u32) -> i32 {
@@ -473,6 +530,96 @@ pub extern "C" fn js_string_split(s: *const StringHeader, delimiter: *const Stri
     }
 
     arr
+}
+
+/// Allocate a string containing a single space character " "
+/// Used as default pad string for padStart/padEnd
+#[no_mangle]
+pub extern "C" fn js_string_alloc_space() -> *mut StringHeader {
+    js_string_from_bytes(" ".as_ptr(), 1)
+}
+
+/// Pad the start of a string to reach target length
+/// str.padStart(targetLength, padString)
+#[no_mangle]
+pub extern "C" fn js_string_pad_start(s: *const StringHeader, target_length: u32, pad_string: *const StringHeader) -> *mut StringHeader {
+    let str_data = string_as_str(s);
+    let pad_data = string_as_str(pad_string);
+
+    let current_len = str_data.chars().count();
+    let target_len = target_length as usize;
+
+    if current_len >= target_len || pad_data.is_empty() {
+        // Return a copy of the original string
+        return js_string_from_bytes(str_data.as_ptr(), str_data.len() as u32);
+    }
+
+    let pad_needed = target_len - current_len;
+    let mut result = String::with_capacity(target_len * 4); // UTF-8 can be up to 4 bytes per char
+
+    // Build padding
+    let pad_chars: Vec<char> = pad_data.chars().collect();
+    let mut pad_idx = 0;
+    for _ in 0..pad_needed {
+        result.push(pad_chars[pad_idx % pad_chars.len()]);
+        pad_idx += 1;
+    }
+
+    // Append original string
+    result.push_str(str_data);
+
+    js_string_from_bytes(result.as_ptr(), result.len() as u32)
+}
+
+/// Pad the end of a string to reach target length
+/// str.padEnd(targetLength, padString)
+#[no_mangle]
+pub extern "C" fn js_string_pad_end(s: *const StringHeader, target_length: u32, pad_string: *const StringHeader) -> *mut StringHeader {
+    let str_data = string_as_str(s);
+    let pad_data = string_as_str(pad_string);
+
+    let current_len = str_data.chars().count();
+    let target_len = target_length as usize;
+
+    if current_len >= target_len || pad_data.is_empty() {
+        // Return a copy of the original string
+        return js_string_from_bytes(str_data.as_ptr(), str_data.len() as u32);
+    }
+
+    let pad_needed = target_len - current_len;
+    let mut result = String::with_capacity(target_len * 4); // UTF-8 can be up to 4 bytes per char
+
+    // Start with original string
+    result.push_str(str_data);
+
+    // Build padding
+    let pad_chars: Vec<char> = pad_data.chars().collect();
+    let mut pad_idx = 0;
+    for _ in 0..pad_needed {
+        result.push(pad_chars[pad_idx % pad_chars.len()]);
+        pad_idx += 1;
+    }
+
+    js_string_from_bytes(result.as_ptr(), result.len() as u32)
+}
+
+/// Repeat a string a specified number of times
+/// str.repeat(count)
+#[no_mangle]
+pub extern "C" fn js_string_repeat(s: *const StringHeader, count: i32) -> *mut StringHeader {
+    if s.is_null() || count <= 0 {
+        // Return empty string
+        return js_string_from_bytes("".as_ptr(), 0);
+    }
+
+    let str_data = string_as_str(s);
+    if str_data.is_empty() {
+        return js_string_from_bytes("".as_ptr(), 0);
+    }
+
+    let count = count as usize;
+    let result = str_data.repeat(count);
+    js_string_from_bytes(result.as_ptr(), result.len() as u32)
 }
 
 #[cfg(test)]

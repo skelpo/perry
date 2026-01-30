@@ -34,12 +34,17 @@ pub const NATIVE_MODULES: &[&str] = &[
     "child_process",
     "net",
     "stream",
+    "fs",
+    "path",
+    "util",
+    "url",
     // Utility libraries
     "lru-cache",
     "commander",
     "big.js",
     "decimal.js",
     "bignumber.js",
+    "exponential-backoff",
 ];
 
 /// Check if a module path refers to a native stdlib module
@@ -776,6 +781,14 @@ pub enum Expr {
         callback: Option<Box<Expr>>,
     },
 
+    // Fetch operations
+    FetchWithOptions {                   // fetch(url, {method, body, headers}) -> Promise<Response>
+        url: Box<Expr>,
+        method: Box<Expr>,
+        body: Box<Expr>,
+        headers: Vec<(String, Expr)>,
+    },
+
     // Net operations
     NetCreateServer {                    // net.createServer(options?, connectionListener?) -> Server
         options: Option<Box<Expr>>,
@@ -966,6 +979,17 @@ pub enum Expr {
     /// Object.keys(obj) -> string[]
     /// Returns an array of the object's own enumerable property names
     ObjectKeys(Box<Expr>),
+    /// Object.values(obj) -> any[]
+    /// Returns an array of the object's own enumerable property values
+    ObjectValues(Box<Expr>),
+    /// Object.entries(obj) -> [string, any][]
+    /// Returns an array of the object's own enumerable [key, value] pairs
+    ObjectEntries(Box<Expr>),
+
+    // Array static methods
+    /// Array.isArray(value) -> boolean
+    /// Returns true if the value is an array
+    ArrayIsArray(Box<Expr>),
 
     // Global built-in functions
     /// parseInt(string, radix?) -> number

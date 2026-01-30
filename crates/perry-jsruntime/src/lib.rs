@@ -16,8 +16,9 @@ pub use bridge::{native_to_v8, v8_to_native, store_js_handle, get_js_handle, rel
     is_js_handle, get_handle_id, make_js_handle_value};
 pub use interop::{
     js_call_function, js_call_method, js_get_export, js_load_module, js_register_native_function,
-    js_runtime_init, js_runtime_shutdown, js_get_property, js_set_property,
+    js_runtime_init, js_runtime_shutdown, js_handle_object_get_property, js_set_property,
     js_new_instance, js_new_from_handle, js_create_callback,
+    js_handle_array_get, js_handle_array_length,
 };
 // Re-export deno_core's ModuleLoader trait for external use
 pub use deno_core::ModuleLoader;

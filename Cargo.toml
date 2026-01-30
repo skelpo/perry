@@ -32,10 +32,10 @@ opt-level = "s"       # Optimize for size in stdlib
 opt-level = 3
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.15"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/user/perry"
+repository = "https://github.com/skelpo/perry"
 
 [workspace.dependencies]
 # SWC for TypeScript parsing

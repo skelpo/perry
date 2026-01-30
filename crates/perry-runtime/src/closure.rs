@@ -118,6 +118,101 @@ pub extern "C" fn js_closure_call3(closure: *const ClosureHeader, arg0: f64, arg
     }
 }
 
+/// Call a closure with 4 arguments, returning f64
+#[no_mangle]
+pub extern "C" fn js_closure_call4(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64) -> f64 {
+    unsafe {
+        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
+        func(closure, arg0, arg1, arg2, arg3)
+    }
+}
+
+/// Call a closure with 5 arguments, returning f64
+#[no_mangle]
+pub extern "C" fn js_closure_call5(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64) -> f64 {
+    unsafe {
+        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
+        func(closure, arg0, arg1, arg2, arg3, arg4)
+    }
+}
+
+/// Call a JavaScript function value with variable arguments
+/// This is the native implementation for dynamic function dispatch.
+/// func_value: NaN-boxed f64 containing a closure pointer
+/// args_ptr: pointer to array of f64 arguments
+/// args_len: number of arguments
+/// Returns the result as f64
+#[no_mangle]
+pub unsafe extern "C" fn js_call_value(
+    func_value: f64,
+    args_ptr: *const f64,
+    args_len: usize,
+) -> f64 {
+    use crate::value::JSValue;
+
+    let jsval = JSValue::from_bits(func_value.to_bits());
+
+    // Get the closure pointer from the value
+    // For native compilation, function values are stored as NaN-boxed pointers
+    let closure: *const ClosureHeader = if jsval.is_pointer() {
+        jsval.as_pointer()
+    } else {
+        // Try treating the value directly as a pointer (for i64 representation)
+        func_value.to_bits() as *const ClosureHeader
+    };
+
+    if closure.is_null() {
+        // Return undefined for null/invalid closures
+        return f64::from_bits(JSValue::undefined().bits());
+    }
+
+    // Call with the appropriate arity
+    match args_len {
+        0 => js_closure_call0(closure),
+        1 => {
+            let arg0 = if args_ptr.is_null() { 0.0 } else { *args_ptr };
+            js_closure_call1(closure, arg0)
+        }
+        2 => {
+            let arg0 = if args_ptr.is_null() { 0.0 } else { *args_ptr };
+            let arg1 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(1) };
+            js_closure_call2(closure, arg0, arg1)
+        }
+        3 => {
+            let arg0 = if args_ptr.is_null() { 0.0 } else { *args_ptr };
+            let arg1 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(1) };
+            let arg2 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(2) };
+            js_closure_call3(closure, arg0, arg1, arg2)
+        }
+        4 => {
+            let arg0 = if args_ptr.is_null() { 0.0 } else { *args_ptr };
+            let arg1 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(1) };
+            let arg2 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(2) };
+            let arg3 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(3) };
+            js_closure_call4(closure, arg0, arg1, arg2, arg3)
+        }
+        5 => {
+            let arg0 = if args_ptr.is_null() { 0.0 } else { *args_ptr };
+            let arg1 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(1) };
+            let arg2 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(2) };
+            let arg3 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(3) };
+            let arg4 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(4) };
+            js_closure_call5(closure, arg0, arg1, arg2, arg3, arg4)
+        }
+        _ => {
+            // For more than 5 arguments, we'd need a more generic approach
+            // For now, just call with as many as we can handle
+            eprintln!("Warning: js_call_value called with {} args, only supporting up to 5", args_len);
+            let arg0 = if args_ptr.is_null() { 0.0 } else { *args_ptr };
+            let arg1 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(1) };
+            let arg2 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(2) };
+            let arg3 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(3) };
+            let arg4 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(4) };
+            js_closure_call5(closure, arg0, arg1, arg2, arg3, arg4)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
