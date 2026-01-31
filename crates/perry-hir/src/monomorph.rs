@@ -1024,6 +1024,10 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
         Expr::FsExistsSync(path) => Expr::FsExistsSync(Box::new(substitute_expr(path, substitutions))),
         Expr::FsMkdirSync(path) => Expr::FsMkdirSync(Box::new(substitute_expr(path, substitutions))),
         Expr::FsUnlinkSync(path) => Expr::FsUnlinkSync(Box::new(substitute_expr(path, substitutions))),
+        Expr::FsAppendFileSync(path, content) => Expr::FsAppendFileSync(
+            Box::new(substitute_expr(path, substitutions)),
+            Box::new(substitute_expr(content, substitutions)),
+        ),
 
         // Path operations
         Expr::PathJoin(a, b) => Expr::PathJoin(
@@ -1103,8 +1107,8 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
 
         // Map operations
         Expr::MapNew => Expr::MapNew,
-        Expr::MapSet { map_id, key, value } => Expr::MapSet {
-            map_id: *map_id,
+        Expr::MapSet { map, key, value } => Expr::MapSet {
+            map: Box::new(substitute_expr(map, substitutions)),
             key: Box::new(substitute_expr(key, substitutions)),
             value: Box::new(substitute_expr(value, substitutions)),
         },
@@ -1765,6 +1769,10 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
         Expr::FsExistsSync(path) | Expr::FsMkdirSync(path) | Expr::FsUnlinkSync(path) => {
             collect_instantiations_in_expr(path, ctx, module);
         }
+        Expr::FsAppendFileSync(path, content) => {
+            collect_instantiations_in_expr(path, ctx, module);
+            collect_instantiations_in_expr(content, ctx, module);
+        }
         Expr::PathJoin(a, b) => {
             collect_instantiations_in_expr(a, ctx, module);
             collect_instantiations_in_expr(b, ctx, module);
@@ -1800,7 +1808,8 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
             collect_instantiations_in_expr(delimiter, ctx, module);
         }
         Expr::MapNew => {}
-        Expr::MapSet { map_id: _, key, value } => {
+        Expr::MapSet { map, key, value } => {
+            collect_instantiations_in_expr(map, ctx, module);
             collect_instantiations_in_expr(key, ctx, module);
             collect_instantiations_in_expr(value, ctx, module);
         }
@@ -2162,6 +2171,10 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
         Expr::FsExistsSync(path) | Expr::FsMkdirSync(path) | Expr::FsUnlinkSync(path) => {
             update_call_sites_in_expr(path, ctx, lookup);
         }
+        Expr::FsAppendFileSync(path, content) => {
+            update_call_sites_in_expr(path, ctx, lookup);
+            update_call_sites_in_expr(content, ctx, lookup);
+        }
         Expr::PathJoin(a, b) => {
             update_call_sites_in_expr(a, ctx, lookup);
             update_call_sites_in_expr(b, ctx, lookup);
@@ -2197,7 +2210,8 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
             update_call_sites_in_expr(delimiter, ctx, lookup);
         }
         Expr::MapNew => {}
-        Expr::MapSet { map_id: _, key, value } => {
+        Expr::MapSet { map, key, value } => {
+            update_call_sites_in_expr(map, ctx, lookup);
             update_call_sites_in_expr(key, ctx, lookup);
             update_call_sites_in_expr(value, ctx, lookup);
         }

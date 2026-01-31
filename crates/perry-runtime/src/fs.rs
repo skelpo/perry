@@ -66,6 +66,48 @@ pub extern "C" fn js_fs_write_file_sync(
     }
 }
 
+/// Append content to a file synchronously
+/// Returns 1 on success, 0 on failure
+#[no_mangle]
+pub extern "C" fn js_fs_append_file_sync(
+    path_ptr: *const StringHeader,
+    content_ptr: *const StringHeader,
+) -> i32 {
+    use std::io::Write;
+    use std::fs::OpenOptions;
+
+    unsafe {
+        if path_ptr.is_null() || content_ptr.is_null() {
+            return 0;
+        }
+
+        // Get path string
+        let path_len = (*path_ptr).length as usize;
+        let path_data = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+        let path_bytes = std::slice::from_raw_parts(path_data, path_len);
+        let path_str = match std::str::from_utf8(path_bytes) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+
+        // Get content string
+        let content_len = (*content_ptr).length as usize;
+        let content_data = (content_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+        let content_bytes = std::slice::from_raw_parts(content_data, content_len);
+
+        // Open file in append mode, creating if it doesn't exist
+        match OpenOptions::new().create(true).append(true).open(path_str) {
+            Ok(mut file) => {
+                match file.write_all(content_bytes) {
+                    Ok(_) => 1,
+                    Err(_) => 0,
+                }
+            }
+            Err(_) => 0,
+        }
+    }
+}
+
 /// Check if a file or directory exists
 /// Returns 1 if exists, 0 if not
 #[no_mangle]

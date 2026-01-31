@@ -651,6 +651,7 @@ pub enum Expr {
     FsExistsSync(Box<Expr>),             // fs.existsSync(path) -> boolean
     FsMkdirSync(Box<Expr>),              // fs.mkdirSync(path) -> void
     FsUnlinkSync(Box<Expr>),             // fs.unlinkSync(path) -> void
+    FsAppendFileSync(Box<Expr>, Box<Expr>), // fs.appendFileSync(path, content) -> void
 
     // Path operations
     PathJoin(Box<Expr>, Box<Expr>),      // path.join(a, b) -> string
@@ -829,7 +830,7 @@ pub enum Expr {
 
     // Map operations
     MapNew,                                                    // new Map() -> empty map
-    MapSet { map_id: LocalId, key: Box<Expr>, value: Box<Expr> }, // map.set(key, value) -> map (updates local)
+    MapSet { map: Box<Expr>, key: Box<Expr>, value: Box<Expr> }, // map.set(key, value) -> map
     MapGet { map: Box<Expr>, key: Box<Expr> },                 // map.get(key) -> value | undefined
     MapHas { map: Box<Expr>, key: Box<Expr> },                 // map.has(key) -> boolean
     MapDelete { map: Box<Expr>, key: Box<Expr> },              // map.delete(key) -> boolean

@@ -608,7 +608,7 @@ fn transform_expr(
         Expr::FsReadFileSync(e) | Expr::FsExistsSync(e) | Expr::FsMkdirSync(e) | Expr::FsUnlinkSync(e) => {
             transform_expr(e, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
-        Expr::FsWriteFileSync(a, b) | Expr::PathJoin(a, b) | Expr::MathPow(a, b) => {
+        Expr::FsWriteFileSync(a, b) | Expr::FsAppendFileSync(a, b) | Expr::PathJoin(a, b) | Expr::MathPow(a, b) => {
             transform_expr(a, js_imports, extern_func_to_js, local_name_to_js, tracker);
             transform_expr(b, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
@@ -675,7 +675,8 @@ fn transform_expr(
             transform_expr(b, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
         // Map/Set methods
-        Expr::MapSet { key, value, .. } => {
+        Expr::MapSet { map, key, value } => {
+            transform_expr(map, js_imports, extern_func_to_js, local_name_to_js, tracker);
             transform_expr(key, js_imports, extern_func_to_js, local_name_to_js, tracker);
             transform_expr(value, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }

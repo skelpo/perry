@@ -227,6 +227,75 @@ pub extern "C" fn js_console_log_i64(value: i64) {
 
 /// Print multiple values from an array (console.log with spread support)
 /// Takes a pointer to an ArrayHeader containing f64 values
+/// Helper function to format a JSValue as a string (for spread arrays)
+fn format_jsvalue(value: f64, depth: usize) -> String {
+    // Prevent stack overflow with deeply nested structures
+    if depth > 10 {
+        return "[...]".to_string();
+    }
+
+    let jsval = JSValue::from_bits(value.to_bits());
+
+    unsafe {
+        if jsval.is_undefined() {
+            "undefined".to_string()
+        } else if jsval.is_null() {
+            "null".to_string()
+        } else if jsval.is_bool() {
+            jsval.as_bool().to_string()
+        } else if jsval.is_string() {
+            let ptr = jsval.as_string_ptr();
+            if ptr.is_null() {
+                "null".to_string()
+            } else {
+                let len = (*ptr).length as usize;
+                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                let bytes = std::slice::from_raw_parts(data, len);
+                std::str::from_utf8(bytes).unwrap_or("[invalid utf8]").to_string()
+            }
+        } else if jsval.is_pointer() {
+            let ptr: *const crate::array::ArrayHeader = jsval.as_pointer();
+            if ptr.is_null() {
+                "null".to_string()
+            } else {
+                // Check if this is an array by reading its header
+                // Arrays have a valid length and capacity
+                let maybe_arr = ptr;
+                let length = (*maybe_arr).length as usize;
+                let capacity = (*maybe_arr).capacity as usize;
+
+                // Heuristic: if capacity >= length and both are reasonable, it's likely an array
+                if capacity >= length && length < 1_000_000 && capacity < 10_000_000 {
+                    // Format as array
+                    let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
+                    let mut parts: Vec<String> = Vec::with_capacity(length);
+                    for i in 0..length {
+                        let elem_value = *data_ptr.add(i);
+                        parts.push(format_jsvalue(elem_value, depth + 1));
+                    }
+                    format!("[{}]", parts.join(", "))
+                } else {
+                    "[object Object]".to_string()
+                }
+            }
+        } else if jsval.is_int32() {
+            jsval.as_int32().to_string()
+        } else {
+            // Regular number
+            let n = value;
+            if n.is_nan() {
+                "NaN".to_string()
+            } else if n.is_infinite() {
+                if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+            } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+                (n as i64).to_string()
+            } else {
+                n.to_string()
+            }
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn js_console_log_spread(arr_ptr: *const crate::array::ArrayHeader) {
     if arr_ptr.is_null() {
@@ -241,43 +310,7 @@ pub extern "C" fn js_console_log_spread(arr_ptr: *const crate::array::ArrayHeade
         let mut parts: Vec<String> = Vec::with_capacity(length);
         for i in 0..length {
             let value = *data_ptr.add(i);
-            let bits = value.to_bits();
-            let jsval = JSValue::from_bits(bits);
-
-            let formatted = if jsval.is_undefined() {
-                "undefined".to_string()
-            } else if jsval.is_null() {
-                "null".to_string()
-            } else if jsval.is_bool() {
-                jsval.as_bool().to_string()
-            } else if jsval.is_string() {
-                let ptr = jsval.as_string_ptr();
-                if ptr.is_null() {
-                    "null".to_string()
-                } else {
-                    let len = (*ptr).length as usize;
-                    let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                    let bytes = std::slice::from_raw_parts(data, len);
-                    std::str::from_utf8(bytes).unwrap_or("[invalid utf8]").to_string()
-                }
-            } else if jsval.is_pointer() {
-                "[object Object]".to_string()
-            } else if jsval.is_int32() {
-                jsval.as_int32().to_string()
-            } else {
-                // Regular number
-                let n = value;
-                if n.is_nan() {
-                    "NaN".to_string()
-                } else if n.is_infinite() {
-                    if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
-                } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
-                    (n as i64).to_string()
-                } else {
-                    n.to_string()
-                }
-            };
-            parts.push(formatted);
+            parts.push(format_jsvalue(value, 0));
         }
         println!("{}", parts.join(" "));
     }
@@ -343,6 +376,64 @@ pub extern "C" fn js_console_error_spread(arr_ptr: *const crate::array::ArrayHea
 pub extern "C" fn js_console_warn_spread(arr_ptr: *const crate::array::ArrayHeader) {
     // console.warn is essentially the same as console.error in Node.js
     js_console_error_spread(arr_ptr);
+}
+
+/// Print an array in the format [element1, element2, ...]
+#[no_mangle]
+pub extern "C" fn js_array_print(arr_ptr: *const crate::array::ArrayHeader) {
+    if arr_ptr.is_null() {
+        println!("null");
+        return;
+    }
+
+    unsafe {
+        let length = (*arr_ptr).length as usize;
+        let data_ptr = (arr_ptr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
+
+        let mut parts: Vec<String> = Vec::with_capacity(length);
+        for i in 0..length {
+            let value = *data_ptr.add(i);
+            let jsval = JSValue::from_bits(value.to_bits());
+
+            let formatted = if jsval.is_undefined() {
+                "undefined".to_string()
+            } else if jsval.is_null() {
+                "null".to_string()
+            } else if jsval.is_bool() {
+                jsval.as_bool().to_string()
+            } else if jsval.is_string() {
+                let ptr = jsval.as_string_ptr();
+                if ptr.is_null() {
+                    "null".to_string()
+                } else {
+                    let len = (*ptr).length as usize;
+                    let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                    let bytes = std::slice::from_raw_parts(data, len);
+                    // Format strings with quotes for array display
+                    format!("'{}'", std::str::from_utf8(bytes).unwrap_or("[invalid utf8]"))
+                }
+            } else if jsval.is_pointer() {
+                "[object Object]".to_string()
+            } else if jsval.is_int32() {
+                jsval.as_int32().to_string()
+            } else {
+                // Regular number
+                let n = value;
+                if n.is_nan() {
+                    "NaN".to_string()
+                } else if n.is_infinite() {
+                    if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+                } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+                    (n as i64).to_string()
+                } else {
+                    n.to_string()
+                }
+            };
+
+            parts.push(formatted);
+        }
+        println!("[{}]", parts.join(", "));
+    }
 }
 
 // Arithmetic operations on JSValue (with type coercion)

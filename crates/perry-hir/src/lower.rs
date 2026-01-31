@@ -870,6 +870,33 @@ fn lower_module_decl(
                                 }
                             }
 
+                            // Check if this is a native module factory function call (e.g., mysql.createPool())
+                            if let ast::Expr::Call(call_expr) = init.as_ref() {
+                                if let ast::Callee::Expr(callee) = &call_expr.callee {
+                                    if let ast::Expr::Member(member) = callee.as_ref() {
+                                        if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                                            let obj_name = obj_ident.sym.as_ref();
+                                            // Check if it's a known native module
+                                            if let Some((module_name, _)) = ctx.lookup_native_module(obj_name) {
+                                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                                    let method_name = method_ident.sym.as_ref();
+                                                    // Map factory functions to their class names
+                                                    let class_name = match (module_name, method_name) {
+                                                        ("mysql2" | "mysql2/promise", "createPool") => Some("Pool"),
+                                                        ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
+                                                        ("pg", "connect") => Some("Client"),
+                                                        _ => None,
+                                                    };
+                                                    if let Some(class_name) = class_name {
+                                                        ctx.register_native_instance(name.clone(), module_name.to_string(), class_name.to_string());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             // Track exported values that need cross-module access
                             // Include: object literals, call expressions (e.g., Router()), array literals,
                             // and new expressions (e.g., new Router())
@@ -3129,17 +3156,17 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                     if let ast::Expr::Member(member) = expr.as_ref() {
                         if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
                             let obj_name = obj_ident.sym.to_string();
-                            // Clone module_name to avoid borrow issues
+                            // Clone module_name and class_name to avoid borrow issues
                             let native_instance = ctx.lookup_native_instance(&obj_name)
-                                .map(|(m, _c)| m.to_string());
-                            if let Some(module_name) = native_instance {
+                                .map(|(m, c)| (m.to_string(), c.to_string()));
+                            if let Some((module_name, class_name)) = native_instance {
                                 if let ast::MemberProp::Ident(method_ident) = &member.prop {
                                     let method_name = method_ident.sym.to_string();
                                     // Get the object expression (the instance variable)
                                     let object_expr = lower_expr(ctx, &member.obj)?;
                                     return Ok(Expr::NativeMethodCall {
                                         module: module_name,
-                                        class_name: None,  // Will be set by js_transform if needed
+                                        class_name: Some(class_name),  // Use the registered class name
                                         object: Some(Box::new(object_expr)),
                                         method: method_name,
                                         args,
@@ -3786,7 +3813,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                 let key = args_iter.next().unwrap();
                                                 let value = args_iter.next().unwrap();
                                                 return Ok(Expr::MapSet {
-                                                    map_id: array_id,
+                                                    map: Box::new(Expr::LocalGet(array_id)),
                                                     key: Box::new(key),
                                                     value: Box::new(value),
                                                 });
@@ -4147,6 +4174,84 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                 options,
                                                 callback,
                                             });
+                                        }
+                                    }
+                                    _ => {} // Fall through
+                                }
+                            }
+
+                            // Check if this is a named import from path (e.g., join, dirname, basename)
+                            if module_name == "path" {
+                                match func_name {
+                                    "join" => {
+                                        if args.len() >= 2 {
+                                            let mut iter = args.into_iter();
+                                            let a = iter.next().unwrap();
+                                            let b = iter.next().unwrap();
+                                            return Ok(Expr::PathJoin(Box::new(a), Box::new(b)));
+                                        }
+                                    }
+                                    "dirname" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::PathDirname(Box::new(args.into_iter().next().unwrap())));
+                                        }
+                                    }
+                                    "basename" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::PathBasename(Box::new(args.into_iter().next().unwrap())));
+                                        }
+                                    }
+                                    "extname" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::PathExtname(Box::new(args.into_iter().next().unwrap())));
+                                        }
+                                    }
+                                    "resolve" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::PathResolve(Box::new(args.into_iter().next().unwrap())));
+                                        }
+                                    }
+                                    _ => {} // Fall through
+                                }
+                            }
+
+                            // Check if this is a named import from fs (e.g., existsSync, mkdirSync, etc.)
+                            if module_name == "fs" {
+                                match func_name {
+                                    "readFileSync" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::FsReadFileSync(Box::new(args.into_iter().next().unwrap())));
+                                        }
+                                    }
+                                    "writeFileSync" => {
+                                        if args.len() >= 2 {
+                                            let mut iter = args.into_iter();
+                                            let path = iter.next().unwrap();
+                                            let content = iter.next().unwrap();
+                                            return Ok(Expr::FsWriteFileSync(Box::new(path), Box::new(content)));
+                                        }
+                                    }
+                                    "existsSync" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::FsExistsSync(Box::new(args.into_iter().next().unwrap())));
+                                        }
+                                    }
+                                    "mkdirSync" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::FsMkdirSync(Box::new(args.into_iter().next().unwrap())));
+                                        }
+                                    }
+                                    "unlinkSync" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::FsUnlinkSync(Box::new(args.into_iter().next().unwrap())));
+                                        }
+                                    }
+                                    "appendFileSync" => {
+                                        if args.len() >= 2 {
+                                            let mut iter = args.into_iter();
+                                            let path = iter.next().unwrap();
+                                            let content = iter.next().unwrap();
+                                            return Ok(Expr::FsAppendFileSync(Box::new(path), Box::new(content)));
                                         }
                                     }
                                     _ => {} // Fall through
@@ -6211,6 +6316,35 @@ fn lower_var_decl_with_destructuring(
                 }
             }
 
+            // Check if this is a native module factory function call (e.g., mysql.createPool())
+            if let Some(init_expr) = &decl.init {
+                if let ast::Expr::Call(call_expr) = init_expr.as_ref() {
+                    if let ast::Callee::Expr(callee) = &call_expr.callee {
+                        if let ast::Expr::Member(member) = callee.as_ref() {
+                            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                                let obj_name = obj_ident.sym.as_ref();
+                                // Check if it's a known native module
+                                if let Some((module_name, _)) = ctx.lookup_native_module(obj_name) {
+                                    if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                        let method_name = method_ident.sym.as_ref();
+                                        // Map factory functions to their class names
+                                        let class_name = match (module_name, method_name) {
+                                            ("mysql2" | "mysql2/promise", "createPool") => Some("Pool"),
+                                            ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
+                                            ("pg", "connect") => Some("Client"),
+                                            _ => None,
+                                        };
+                                        if let Some(class_name) = class_name {
+                                            ctx.register_native_instance(name.clone(), module_name.to_string(), class_name.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Check if this is a require() call for a built-in module
             if let Some(init_expr) = &decl.init {
                 if let Some(module_name) = is_require_builtin_module(init_expr) {
@@ -6706,6 +6840,10 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
         Expr::FsExistsSync(path) | Expr::FsMkdirSync(path) | Expr::FsUnlinkSync(path) => {
             collect_local_refs_expr(path, refs);
         }
+        Expr::FsAppendFileSync(path, content) => {
+            collect_local_refs_expr(path, refs);
+            collect_local_refs_expr(content, refs);
+        }
         // Path operations
         Expr::PathJoin(a, b) => {
             collect_local_refs_expr(a, refs);
@@ -6790,8 +6928,8 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
         }
         // Map operations
         Expr::MapNew => {}
-        Expr::MapSet { map_id, key, value } => {
-            refs.push(*map_id);
+        Expr::MapSet { map, key, value } => {
+            collect_local_refs_expr(map, refs);
             collect_local_refs_expr(key, refs);
             collect_local_refs_expr(value, refs);
         }
@@ -7334,6 +7472,10 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
         Expr::FsExistsSync(path) | Expr::FsMkdirSync(path) | Expr::FsUnlinkSync(path) => {
             collect_assigned_locals_expr(path, assigned);
         }
+        Expr::FsAppendFileSync(path, content) => {
+            collect_assigned_locals_expr(path, assigned);
+            collect_assigned_locals_expr(content, assigned);
+        }
         // Path operations
         Expr::PathJoin(a, b) => {
             collect_assigned_locals_expr(a, assigned);
@@ -7414,8 +7556,8 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
         }
         // Map operations
         Expr::MapNew => {}
-        Expr::MapSet { map_id, key, value } => {
-            assigned.push(*map_id);  // Map is modified by set
+        Expr::MapSet { map, key, value } => {
+            collect_assigned_locals_expr(map, assigned);
             collect_assigned_locals_expr(key, assigned);
             collect_assigned_locals_expr(value, assigned);
         }
