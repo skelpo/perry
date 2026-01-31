@@ -656,6 +656,42 @@ pub unsafe extern "C" fn js_call_method(
     JSValue::undefined().bits() as f64
 }
 
+/// Special class ID for native module namespace objects
+/// This is used to identify objects that represent native module namespaces
+pub const NATIVE_MODULE_CLASS_ID: u32 = 0xFFFFFFFE;
+
+/// Create a native module namespace object
+/// This is used for `import * as X from 'module'` patterns
+/// The returned object identifies itself as an object (typeof returns "object")
+/// and stores the module name for debugging purposes
+///
+/// module_name_ptr: pointer to the module name string bytes
+/// module_name_len: length of the module name
+/// Returns the object as a NaN-boxed f64
+#[no_mangle]
+pub extern "C" fn js_create_native_module_namespace(module_name_ptr: *const u8, module_name_len: usize) -> f64 {
+    // Create an object with one field to store the module name
+    let obj = js_object_alloc(NATIVE_MODULE_CLASS_ID, 1);
+
+    unsafe {
+        // Create a string from the module name
+        let module_name = crate::string::js_string_from_bytes(module_name_ptr, module_name_len as u32);
+
+        // Store the module name in the first field
+        js_object_set_field(obj, 0, JSValue::string_ptr(module_name));
+
+        // Create a keys array with one key: "__module__"
+        let keys_array = crate::array::js_array_alloc(1);
+        let key_bytes = b"__module__";
+        let key_str = crate::string::js_string_from_bytes(key_bytes.as_ptr(), key_bytes.len() as u32);
+        crate::array::js_array_push(keys_array, JSValue::string_ptr(key_str));
+        js_object_set_keys(obj, keys_array);
+    }
+
+    // Return as NaN-boxed pointer
+    crate::value::js_nanbox_pointer(obj as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

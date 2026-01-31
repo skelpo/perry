@@ -434,6 +434,25 @@ pub extern "C" fn js_string_char_code_at(s: *const StringHeader, index: u32) -> 
     }
 }
 
+/// Get character at index (returns single-character string, empty string if out of bounds)
+#[no_mangle]
+pub extern "C" fn js_string_char_at(s: *const StringHeader, index: i32) -> *mut StringHeader {
+    if s.is_null() || index < 0 {
+        return js_string_from_bytes(std::ptr::null(), 0);
+    }
+
+    let len = unsafe { (*s).length };
+    if index as u32 >= len {
+        return js_string_from_bytes(std::ptr::null(), 0);
+    }
+
+    unsafe {
+        let data = string_data(s);
+        let char_ptr = data.add(index as usize);
+        js_string_from_bytes(char_ptr, 1)
+    }
+}
+
 /// Print a string to stdout
 #[no_mangle]
 pub extern "C" fn js_string_print(s: *const StringHeader) {

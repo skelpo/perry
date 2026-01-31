@@ -378,6 +378,34 @@ pub extern "C" fn js_nanbox_get_string_pointer(value: f64) -> i64 {
     }
 }
 
+/// Extract a string pointer from an f64 value that may be either:
+/// 1. A properly NaN-boxed string (with STRING_TAG)
+/// 2. A raw pointer bitcast to f64 (for locally-created strings)
+/// This unified function handles both cases for function parameters.
+#[no_mangle]
+pub extern "C" fn js_get_string_pointer_unified(value: f64) -> i64 {
+    let bits = value.to_bits();
+    let jsval = JSValue::from_bits(bits);
+
+    // First check if it's a properly NaN-boxed string
+    if jsval.is_string() {
+        return jsval.as_string_ptr() as i64;
+    }
+
+    // Otherwise, assume it's a raw pointer bitcast to f64
+    // This handles locally-created strings that were stored via bitcast
+    // We can detect this by checking if the upper bits look like a valid pointer
+    // (most pointers have the upper bits as 0 or small values)
+    let upper_16 = bits >> 48;
+    if upper_16 < 0x7FFC {
+        // Looks like a raw pointer (not a tagged NaN-box value)
+        return bits as i64;
+    }
+
+    // If it's some other tagged value, return 0
+    0
+}
+
 /// Check if a NaN-boxed f64 value represents a string.
 #[no_mangle]
 pub extern "C" fn js_nanbox_is_string(value: f64) -> bool {
@@ -444,24 +472,45 @@ pub extern "C" fn js_jsvalue_equals(a: f64, b: f64) -> i32 {
     }
 }
 
-/// Unified array element access that handles both JS handle arrays and native arrays.
-/// This is called from compiled code when the array type is not known at compile time.
+/// Unified index access that handles strings, arrays, and JS handles.
+/// This is called from compiled code when the value type is not known at compile time.
+/// For strings, returns the character at the given index as a NaN-boxed string.
+/// For arrays, returns the element at the given index.
 #[no_mangle]
-pub extern "C" fn js_dynamic_array_get(arr_value: f64, index: i32) -> f64 {
+pub extern "C" fn js_dynamic_array_get(value: f64, index: i32) -> f64 {
+    let bits = value.to_bits();
+    let jsval = JSValue::from_bits(bits);
+
+    // Check if this is a NaN-boxed string
+    if jsval.is_string() {
+        // String character access
+        let str_ptr = jsval.as_string_ptr();
+        if !str_ptr.is_null() && index >= 0 {
+            let result_ptr = crate::string::js_string_char_at(str_ptr, index);
+            if !result_ptr.is_null() {
+                // NaN-box the result string pointer
+                return f64::from_bits(STRING_TAG | (result_ptr as u64 & POINTER_MASK));
+            }
+        }
+        // Return empty string for invalid index
+        let empty = crate::string::js_string_from_bytes(std::ptr::null(), 0);
+        return f64::from_bits(STRING_TAG | (empty as u64 & POINTER_MASK));
+    }
+
     // Check if this is a JS handle
-    if is_js_handle(arr_value) {
+    if is_js_handle(value) {
         // Try to use the JS runtime function if it's been registered
         let func_ptr = JS_HANDLE_ARRAY_GET.load(Ordering::SeqCst);
         if !func_ptr.is_null() {
             let func: JsHandleArrayGetFn = unsafe { std::mem::transmute(func_ptr) };
-            return func(arr_value, index);
+            return func(value, index);
         }
         // JS runtime not available - return undefined
         return f64::from_bits(TAG_UNDEFINED);
     }
 
     // Not a JS handle - it's a native array pointer
-    let ptr = js_nanbox_get_pointer(arr_value);
+    let ptr = js_nanbox_get_pointer(value);
     if ptr == 0 {
         // Invalid pointer - return undefined
         return f64::from_bits(TAG_UNDEFINED);

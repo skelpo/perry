@@ -266,12 +266,13 @@ impl LoweringContext {
             .map(|(_, module, class)| (module.as_str(), class.as_str()))
     }
 
-    fn enter_scope(&self) -> usize {
-        self.locals.len()
+    fn enter_scope(&self) -> (usize, usize) {
+        (self.locals.len(), self.native_instances.len())
     }
 
-    fn exit_scope(&mut self, mark: usize) {
-        self.locals.truncate(mark);
+    fn exit_scope(&mut self, mark: (usize, usize)) {
+        self.locals.truncate(mark.0);
+        self.native_instances.truncate(mark.1);
     }
 
 }
