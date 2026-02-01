@@ -14353,20 +14353,31 @@ fn compile_expr(
         }
         // Fetch operations
         Expr::FetchWithOptions { url, method, body, headers } => {
-            // Compile URL string
-            let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, url, this_ctx)?;
-            let url_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), url_val);
+            // Get string pointer extraction function
+            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
 
-            // Compile method string
+            // Compile URL string and extract pointer from NaN-boxed value
+            let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, url, this_ctx)?;
+            let url_f64 = ensure_f64(builder, url_val);
+            let url_call = builder.ins().call(get_str_ref, &[url_f64]);
+            let url_ptr = builder.inst_results(url_call)[0];
+
+            // Compile method string and extract pointer
             let method_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, method, this_ctx)?;
-            let method_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), method_val);
+            let method_f64 = ensure_f64(builder, method_val);
+            let method_call = builder.ins().call(get_str_ref, &[method_f64]);
+            let method_ptr = builder.inst_results(method_call)[0];
 
             // Compile body (can be Undefined or a string)
             let body_ptr = if matches!(body.as_ref(), Expr::Undefined) {
                 builder.ins().iconst(types::I64, 0)
             } else {
                 let body_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, body, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), body_val)
+                let body_f64 = ensure_f64(builder, body_val);
+                let body_call = builder.ins().call(get_str_ref, &[body_f64]);
+                builder.inst_results(body_call)[0]
             };
 
             // Build headers JSON string at runtime to support dynamic values
@@ -15046,9 +15057,14 @@ fn compile_expr(
             let regex_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, regex, this_ctx)?;
             let string_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, string, this_ctx)?;
 
-            // Convert from f64 to i64 pointers
+            // Extract string pointer from NaN-boxed value
+            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
             let regex_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), regex_val);
-            let string_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), string_val);
+            let string_f64 = ensure_f64(builder, string_val);
+            let string_call = builder.ins().call(get_str_ref, &[string_f64]);
+            let string_ptr = builder.inst_results(string_call)[0];
 
             // Call js_regexp_test
             let func = extern_funcs.get("js_regexp_test")
@@ -15066,8 +15082,13 @@ fn compile_expr(
             let string_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, string, this_ctx)?;
             let regex_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, regex, this_ctx)?;
 
-            // Convert from f64 to i64 pointers
-            let string_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), string_val);
+            // Extract string pointer from NaN-boxed value
+            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+            let string_f64 = ensure_f64(builder, string_val);
+            let string_call = builder.ins().call(get_str_ref, &[string_f64]);
+            let string_ptr = builder.inst_results(string_call)[0];
             let regex_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), regex_val);
 
             // Call js_string_match
@@ -15087,10 +15108,17 @@ fn compile_expr(
             let pattern_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, pattern, this_ctx)?;
             let replacement_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, replacement, this_ctx)?;
 
-            // Convert from f64 to i64 pointers
-            let string_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), string_val);
+            // Extract string pointers from NaN-boxed values
+            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+            let string_f64 = ensure_f64(builder, string_val);
+            let string_call = builder.ins().call(get_str_ref, &[string_f64]);
+            let string_ptr = builder.inst_results(string_call)[0];
+            let replacement_f64 = ensure_f64(builder, replacement_val);
+            let replacement_call = builder.ins().call(get_str_ref, &[replacement_f64]);
+            let replacement_ptr = builder.inst_results(replacement_call)[0];
             let pattern_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), pattern_val);
-            let replacement_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), replacement_val);
 
             // Call js_string_replace_regex (treats pattern as regex pointer)
             let func = extern_funcs.get("js_string_replace_regex")
@@ -23864,9 +23892,14 @@ fn compile_expr(
                     // fetch functions
                     match method.as_str() {
                         "fetch" | "fetchText" => {
-                            // fetch(url) - url is string
+                            // fetch(url) - url is NaN-boxed string, extract pointer
+                            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
                             arg_vals.iter().map(|&val| {
-                                builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                let val_f64 = ensure_f64(builder, val);
+                                let call = builder.ins().call(get_str_ref, &[val_f64]);
+                                builder.inst_results(call)[0]
                             }).collect()
                         }
                         _ => arg_vals.clone()
@@ -23875,9 +23908,14 @@ fn compile_expr(
                     // ws module functions
                     match method.as_str() {
                         "connect" => {
-                            // connect(url) - url is string
+                            // connect(url) - url is NaN-boxed string, extract pointer
+                            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
                             arg_vals.iter().map(|&val| {
-                                builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                let val_f64 = ensure_f64(builder, val);
+                                let call = builder.ins().call(get_str_ref, &[val_f64]);
+                                builder.inst_results(call)[0]
                             }).collect()
                         }
                         _ => arg_vals.clone()
