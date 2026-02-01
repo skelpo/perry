@@ -11,6 +11,7 @@ crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 perry-runtime = { path = "../perry-runtime" }
+perry-stdlib = { path = "../perry-stdlib" }
 perry-types.workspace = true
 
 # V8 runtime via deno_core

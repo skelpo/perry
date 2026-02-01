@@ -35,6 +35,9 @@ fn get_parent_class_id(class_id: u32) -> Option<u32> {
 /// Object header - precedes the fields in memory
 #[repr(C)]
 pub struct ObjectHeader {
+    /// Type tag to distinguish from Error objects (must be first field!)
+    /// Uses OBJECT_TYPE_REGULAR (1) for regular objects
+    pub object_type: u32,
     /// Class ID for this object (used for instanceof, vtable lookup)
     pub class_id: u32,
     /// Parent class ID for inheritance chain (0 if no parent)
@@ -79,6 +82,7 @@ pub extern "C" fn js_object_alloc_with_parent(class_id: u32, parent_class_id: u3
         }
 
         // Initialize header
+        (*ptr).object_type = crate::error::OBJECT_TYPE_REGULAR;
         (*ptr).class_id = class_id;
         (*ptr).parent_class_id = parent_class_id;
         (*ptr).field_count = field_count;
@@ -107,6 +111,7 @@ pub extern "C" fn js_object_alloc_fast(class_id: u32, field_count: u32) -> *mut 
 
     unsafe {
         // Initialize header only - fields left uninitialized for constructor to fill
+        (*ptr).object_type = crate::error::OBJECT_TYPE_REGULAR;
         (*ptr).class_id = class_id;
         (*ptr).parent_class_id = 0;
         (*ptr).field_count = field_count;
@@ -131,6 +136,7 @@ pub extern "C" fn js_object_alloc_fast_with_parent(class_id: u32, parent_class_i
     let ptr = arena_alloc(total_size, 8) as *mut ObjectHeader;
 
     unsafe {
+        (*ptr).object_type = crate::error::OBJECT_TYPE_REGULAR;
         (*ptr).class_id = class_id;
         (*ptr).parent_class_id = parent_class_id;
         (*ptr).field_count = field_count;

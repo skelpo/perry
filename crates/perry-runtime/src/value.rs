@@ -49,10 +49,12 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 type JsHandleArrayGetFn = extern "C" fn(f64, i32) -> f64;
 type JsHandleArrayLengthFn = extern "C" fn(f64) -> i32;
 type JsHandleObjectGetPropertyFn = extern "C" fn(f64, *const i8, usize) -> f64;
+type JsHandleToStringFn = extern "C" fn(f64) -> *mut crate::string::StringHeader;
 
 static JS_HANDLE_ARRAY_GET: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static JS_HANDLE_ARRAY_LENGTH: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static JS_HANDLE_OBJECT_GET_PROPERTY: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static JS_HANDLE_TO_STRING: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Set the JS handle array get function (called by perry-jsruntime)
 #[no_mangle]
@@ -70,6 +72,12 @@ pub extern "C" fn js_set_handle_array_length(func: JsHandleArrayLengthFn) {
 #[no_mangle]
 pub extern "C" fn js_set_handle_object_get_property(func: JsHandleObjectGetPropertyFn) {
     JS_HANDLE_OBJECT_GET_PROPERTY.store(func as *mut (), Ordering::SeqCst);
+}
+
+/// Set the JS handle to string conversion function (called by perry-jsruntime)
+#[no_mangle]
+pub extern "C" fn js_set_handle_to_string(func: JsHandleToStringFn) {
+    JS_HANDLE_TO_STRING.store(func as *mut (), Ordering::SeqCst);
 }
 
 /// Check if a NaN-boxed value is a JS handle
@@ -414,9 +422,20 @@ pub extern "C" fn js_nanbox_is_string(value: f64) -> bool {
 }
 
 /// Convert a NaN-boxed f64 value to a string pointer.
-/// Handles all value types: strings (extract pointer), numbers (convert), etc.
+/// Handles all value types: strings (extract pointer), numbers (convert), JS handles, etc.
 #[no_mangle]
 pub extern "C" fn js_jsvalue_to_string(value: f64) -> *mut crate::string::StringHeader {
+    // Check for JS handle first - these come from the JS runtime (e.g., process.env values)
+    if is_js_handle(value) {
+        let func_ptr = JS_HANDLE_TO_STRING.load(Ordering::SeqCst);
+        if !func_ptr.is_null() {
+            let func: JsHandleToStringFn = unsafe { std::mem::transmute(func_ptr) };
+            return func(value);
+        }
+        // Fallback if no handler registered
+        return crate::string::js_string_from_bytes(b"[JS Handle]".as_ptr(), 11);
+    }
+
     let jsval = JSValue::from_bits(value.to_bits());
 
     if jsval.is_string() {
@@ -446,6 +465,47 @@ pub extern "C" fn js_jsvalue_to_string(value: f64) -> *mut crate::string::String
     }
 }
 
+/// Ensure a value is a native string pointer.
+/// This is specifically for fetch headers where we need to handle:
+/// 1. Raw string pointers (literal strings - f64 bits ARE the pointer)
+/// 2. NaN-boxed strings (STRING_TAG)
+/// 3. JS handle strings (from process.env)
+/// Returns the string pointer as i64.
+#[no_mangle]
+pub extern "C" fn js_ensure_string_ptr(value: f64) -> i64 {
+    let bits = value.to_bits();
+
+    // Check for JS handle first - these need conversion
+    if is_js_handle(value) {
+        let func_ptr = JS_HANDLE_TO_STRING.load(Ordering::SeqCst);
+        if !func_ptr.is_null() {
+            let func: JsHandleToStringFn = unsafe { std::mem::transmute(func_ptr) };
+            return func(value) as i64;
+        }
+        // Fallback - create a placeholder string
+        return crate::string::js_string_from_bytes(b"[JS Handle]".as_ptr(), 11) as i64;
+    }
+
+    // Check for NaN-boxed string (STRING_TAG)
+    if (bits & TAG_MASK) == STRING_TAG {
+        let ptr = (bits & POINTER_MASK) as i64;
+        if ptr != 0 {
+            let str_header = ptr as *const crate::string::StringHeader;
+            unsafe {
+                let length = (*str_header).length;
+                // Make a copy of the string to ensure we have a Perry-allocated string
+                let data_ptr = (str_header as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
+                let copy = crate::string::js_string_from_bytes(data_ptr, length);
+                return copy as i64;
+            }
+        }
+        return ptr;
+    }
+
+    // Otherwise, treat the f64 bits directly as a pointer (raw string literal)
+    bits as i64
+}
+
 /// Compare two NaN-boxed f64 values for equality.
 /// Handles string comparison by comparing actual string contents.
 /// Returns 1 if equal, 0 if not.
@@ -470,6 +530,136 @@ pub extern "C" fn js_jsvalue_equals(a: f64, b: f64) -> i32 {
     } else {
         0
     }
+}
+
+/// Check if a JavaScript value is truthy.
+/// In JavaScript, the following values are falsy:
+/// - false
+/// - 0 (and -0)
+/// - NaN
+/// - "" (empty string)
+/// - null
+/// - undefined
+/// Everything else is truthy.
+/// Returns 1 if truthy, 0 if falsy.
+#[no_mangle]
+pub extern "C" fn js_is_truthy(value: f64) -> i32 {
+    let bits = value.to_bits();
+
+    // Check for special tagged values first
+    if bits == TAG_UNDEFINED || bits == TAG_NULL || bits == TAG_FALSE {
+        return 0;
+    }
+
+    // TAG_TRUE is truthy
+    if bits == TAG_TRUE {
+        return 1;
+    }
+
+    // Check for NaN-boxed string (empty string is falsy)
+    if (bits & TAG_MASK) == STRING_TAG {
+        let str_ptr = (bits & POINTER_MASK) as *const crate::string::StringHeader;
+        if str_ptr.is_null() {
+            return 0;
+        }
+        // Empty string is falsy
+        let len = crate::string::js_string_length(str_ptr);
+        if len == 0 {
+            return 0;
+        }
+        return 1;
+    }
+
+    // Check for NaN-boxed pointer (objects/arrays are always truthy)
+    if (bits & TAG_MASK) == POINTER_TAG {
+        return 1;
+    }
+
+    // Check for JS handle (always truthy - they represent objects)
+    if (bits & TAG_MASK) == JS_HANDLE_TAG {
+        return 1;
+    }
+
+    // Check for int32 tag
+    if (bits & TAG_MASK) == INT32_TAG {
+        let int_val = (bits & INT32_MASK) as i32;
+        return if int_val == 0 { 0 } else { 1 };
+    }
+
+    // Check for raw pointer bits (from bitcast of string literal)
+    // In a 64-bit system, valid heap pointers are typically in the range
+    // 0x0000_0000_0000_1000 to 0x0000_FFFF_FFFF_FFFF
+    // This handles strings that were compiled as direct pointers, not NaN-boxed
+    if bits > 0x1000 && bits < 0x0001_0000_0000_0000 {
+        // This could be a raw string pointer - check if it's a valid string
+        let str_ptr = bits as *const crate::string::StringHeader;
+        // Try to read the string length - empty string is falsy
+        let len = crate::string::js_string_length(str_ptr);
+        if len == 0 {
+            return 0;
+        }
+        return 1;
+    }
+
+    // Regular f64 number: 0.0, -0.0, and NaN are falsy
+    if value == 0.0 || value.is_nan() {
+        return 0;
+    }
+
+    // Everything else is truthy
+    1
+}
+
+/// Dynamic string comparison that handles both NaN-boxed strings and raw pointer bitcasts.
+/// This is needed when comparing a PropertyGet result (NaN-boxed) with a string literal (raw bitcast).
+/// Returns 1 if equal, 0 if not.
+#[no_mangle]
+pub extern "C" fn js_dynamic_string_equals(a: f64, b: f64) -> i32 {
+    // Extract string pointers from both values, handling both representations
+    let a_ptr = extract_string_ptr(a);
+    let b_ptr = extract_string_ptr(b);
+
+    if a_ptr.is_null() && b_ptr.is_null() {
+        return 1;
+    }
+    if a_ptr.is_null() || b_ptr.is_null() {
+        return 0;
+    }
+
+    if crate::string::js_string_equals(a_ptr, b_ptr) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Extract a string pointer from an f64 value that might be:
+/// - NaN-boxed with STRING_TAG
+/// - NaN-boxed with POINTER_TAG (for strings stored as generic pointers)
+/// - Raw pointer bits (from bitcast)
+fn extract_string_ptr(value: f64) -> *const crate::StringHeader {
+    let bits = value.to_bits();
+    let jsval = JSValue::from_bits(bits);
+
+    // Check for STRING_TAG first (e.g., from PropertyGet)
+    if jsval.is_string() {
+        return jsval.as_string_ptr();
+    }
+
+    // Check for POINTER_TAG (generic pointer that might be a string)
+    if jsval.is_pointer() {
+        return jsval.as_pointer::<crate::StringHeader>();
+    }
+
+    // Assume raw pointer bits (from bitcast of string literal)
+    // In a 64-bit system, valid heap pointers are typically in the range
+    // 0x0000_0000_0000_0000 to 0x0000_7FFF_FFFF_FFFF
+    // Check if it looks like a valid pointer (not NaN, not a small number)
+    if bits > 0x1000 && bits < 0x0001_0000_0000_0000 {
+        return bits as *const crate::StringHeader;
+    }
+
+    std::ptr::null()
 }
 
 /// Unified index access that handles strings, arrays, and JS handles.
@@ -545,7 +735,75 @@ pub extern "C" fn js_dynamic_array_length(arr_value: f64) -> i32 {
     crate::array::js_array_length(ptr as *const crate::array::ArrayHeader) as i32
 }
 
+/// Dynamic array find that handles both JS handle arrays and native arrays.
+/// Takes the array as f64 (may be NaN-boxed or JS handle) and a callback closure.
+/// Returns the found element as f64, or NaN (undefined) if not found.
+#[no_mangle]
+pub extern "C" fn js_dynamic_array_find(arr_value: f64, callback: *const crate::closure::ClosureHeader) -> f64 {
+    // Check if callback is null
+    if callback.is_null() {
+        return f64::NAN;
+    }
+
+    // Check if this is a JS handle array
+    if is_js_handle(arr_value) {
+        // For JS handle arrays, iterate using dynamic access
+        let length = js_dynamic_array_length(arr_value);
+        for i in 0..length {
+            let element = js_dynamic_array_get(arr_value, i);
+            let result = unsafe { crate::closure::js_closure_call1(callback, element) };
+            // Truthy check: non-zero value
+            if result != 0.0 {
+                return element;
+            }
+        }
+        // Not found - return undefined (NaN)
+        return f64::NAN;
+    }
+
+    // Not a JS handle - extract the native array pointer
+    let ptr = js_nanbox_get_pointer(arr_value);
+    if ptr == 0 {
+        return f64::NAN;
+    }
+
+    // Use the native array find
+    crate::array::js_array_find(ptr as *const crate::array::ArrayHeader, callback)
+}
+
+/// Dynamic array findIndex that handles both JS handle arrays and native arrays.
+/// Takes the array as f64 (may be NaN-boxed or JS handle) and a callback closure.
+/// Returns the index as f64 (-1.0 if not found).
+#[no_mangle]
+pub extern "C" fn js_dynamic_array_findIndex(arr_value: f64, callback: *const crate::closure::ClosureHeader) -> f64 {
+    // Check if this is a JS handle array
+    if is_js_handle(arr_value) {
+        // For JS handle arrays, iterate using dynamic access
+        let length = js_dynamic_array_length(arr_value);
+        for i in 0..length {
+            let element = js_dynamic_array_get(arr_value, i);
+            let result = unsafe { crate::closure::js_closure_call1(callback, element) };
+            // Truthy check: non-zero value
+            if result != 0.0 {
+                return i as f64;
+            }
+        }
+        // Not found
+        return -1.0;
+    }
+
+    // Not a JS handle - extract the native array pointer
+    let ptr = js_nanbox_get_pointer(arr_value);
+    if ptr == 0 {
+        return -1.0;
+    }
+
+    // Use the native array findIndex and convert to f64
+    crate::array::js_array_findIndex(ptr as *const crate::array::ArrayHeader, callback) as f64
+}
+
 /// Unified object property access that handles both JS handle objects and native objects.
+/// Also handles strings for property access like `.length`.
 #[no_mangle]
 pub unsafe extern "C" fn js_dynamic_object_get_property(
     obj_value: f64,
@@ -562,6 +820,30 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
         }
         // JS runtime not available - return undefined
         return f64::from_bits(TAG_UNDEFINED);
+    }
+
+    // Check if this is a NaN-boxed string - handle string properties like .length
+    let bits = obj_value.to_bits();
+    if (bits & TAG_MASK) == STRING_TAG {
+        let str_ptr = (bits & POINTER_MASK) as *const crate::string::StringHeader;
+        if !str_ptr.is_null() {
+            // Get the property name
+            let name_slice = if property_name_ptr.is_null() {
+                return f64::from_bits(TAG_UNDEFINED);
+            } else if property_name_len > 0 {
+                std::slice::from_raw_parts(property_name_ptr as *const u8, property_name_len)
+            } else {
+                std::ffi::CStr::from_ptr(property_name_ptr).to_bytes()
+            };
+
+            // Handle string properties
+            if name_slice == b"length" {
+                let len = crate::string::js_string_length(str_ptr);
+                return len as f64;
+            }
+            // Other string properties return undefined
+            return f64::from_bits(TAG_UNDEFINED);
+        }
     }
 
     // Not a JS handle - it's a native object pointer
@@ -586,6 +868,32 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
         Err(_) => return f64::from_bits(TAG_UNDEFINED),
     };
 
+    // Check the object type tag (first u32 field of both ObjectHeader and ErrorHeader)
+    let object_type = *(ptr as *const u32);
+
+    // Handle Error objects specially
+    if object_type == crate::error::OBJECT_TYPE_ERROR {
+        let error_ptr = ptr as *mut crate::error::ErrorHeader;
+        match property_name {
+            "message" => {
+                let msg = crate::error::js_error_get_message(error_ptr);
+                return js_nanbox_string(msg as i64);
+            }
+            "name" => {
+                let name = crate::error::js_error_get_name(error_ptr);
+                return js_nanbox_string(name as i64);
+            }
+            "stack" => {
+                let stack = crate::error::js_error_get_stack(error_ptr);
+                return js_nanbox_string(stack as i64);
+            }
+            _ => {
+                // Error objects don't have other properties
+                return f64::from_bits(TAG_UNDEFINED);
+            }
+        }
+    }
+
     // Create a Perry string for the key
     let key_ptr = crate::string::js_string_from_bytes(
         property_name.as_ptr(),
@@ -597,6 +905,38 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
         ptr as *const crate::object::ObjectHeader,
         key_ptr,
     )
+}
+
+/// Dynamic Object.keys() that handles both regular objects and Error objects.
+/// Takes a raw pointer (extracted from NaN-boxed value) and returns array of keys.
+#[no_mangle]
+pub unsafe extern "C" fn js_dynamic_object_keys(ptr: i64) -> *mut crate::array::ArrayHeader {
+    if ptr == 0 {
+        return crate::array::js_array_alloc(0);
+    }
+
+    // Check the object type tag (first u32 field of both ObjectHeader and ErrorHeader)
+    let object_type = *(ptr as *const u32);
+
+    // Handle Error objects specially - they have fixed keys
+    if object_type == crate::error::OBJECT_TYPE_ERROR {
+        // Error objects have keys: "message", "name", "stack"
+        let keys = crate::array::js_array_alloc(3);
+
+        let msg_key = crate::string::js_string_from_bytes(b"message".as_ptr(), 7);
+        crate::array::js_array_push(keys, JSValue::string_ptr(msg_key));
+
+        let name_key = crate::string::js_string_from_bytes(b"name".as_ptr(), 4);
+        crate::array::js_array_push(keys, JSValue::string_ptr(name_key));
+
+        let stack_key = crate::string::js_string_from_bytes(b"stack".as_ptr(), 5);
+        crate::array::js_array_push(keys, JSValue::string_ptr(stack_key));
+
+        return keys;
+    }
+
+    // Regular object - delegate to js_object_keys
+    crate::object::js_object_keys(ptr as *const crate::object::ObjectHeader)
 }
 
 #[cfg(test)]

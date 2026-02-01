@@ -36,6 +36,7 @@ pub extern "C" fn js_runtime_init() {
     perry_runtime::js_set_handle_array_get(js_handle_array_get);
     perry_runtime::js_set_handle_array_length(js_handle_array_length);
     perry_runtime::js_set_handle_object_get_property(js_handle_object_get_property);
+    perry_runtime::js_set_handle_to_string(js_handle_to_string);
 }
 
 /// Shutdown the JavaScript runtime and release resources
@@ -528,6 +529,36 @@ pub extern "C" fn js_handle_object_get_property(
         };
 
         v8_to_native(scope, prop_val)
+    })
+}
+
+/// Convert a JavaScript handle value to a native string
+/// handle: NaN-boxed value containing a JS handle
+/// Returns a pointer to a native StringHeader
+#[no_mangle]
+pub extern "C" fn js_handle_to_string(handle: f64) -> *mut perry_runtime::string::StringHeader {
+    with_runtime(|state| {
+        let scope = &mut state.runtime.handle_scope();
+
+        // Convert the handle to a V8 value
+        let v8_val = native_to_v8(scope, handle);
+
+        // Convert to string
+        let str_val = match v8_val.to_string(scope) {
+            Some(s) => s,
+            None => {
+                // Return empty string on failure
+                return perry_runtime::string::js_string_from_bytes(b"".as_ptr(), 0);
+            }
+        };
+
+        // Get the UTF-8 bytes
+        let len = str_val.utf8_length(scope);
+        let mut buffer = vec![0u8; len];
+        str_val.write_utf8(scope, &mut buffer, None, v8::WriteOptions::NO_NULL_TERMINATION);
+
+        // Create a native string
+        perry_runtime::string::js_string_from_bytes(buffer.as_ptr(), buffer.len() as u32)
     })
 }
 

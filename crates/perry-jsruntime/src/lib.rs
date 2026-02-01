@@ -23,6 +23,9 @@ pub use interop::{
 // Re-export deno_core's ModuleLoader trait for external use
 pub use deno_core::ModuleLoader;
 
+// Re-export perry-stdlib to include all its symbols in this staticlib
+pub use perry_stdlib;
+
 use deno_core::{JsRuntime, RuntimeOptions};
 use once_cell::sync::OnceCell;
 use std::cell::RefCell;

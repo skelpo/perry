@@ -604,6 +604,10 @@ fn transform_expr(
                 transform_expr(arg, js_imports, extern_func_to_js, local_name_to_js, tracker);
             }
         }
+        // Dynamic environment variable access
+        Expr::EnvGetDynamic(e) => {
+            transform_expr(e, js_imports, extern_func_to_js, local_name_to_js, tracker);
+        }
         // File system / path / JSON / Math / Crypto operations
         Expr::FsReadFileSync(e) | Expr::FsExistsSync(e) | Expr::FsMkdirSync(e) | Expr::FsUnlinkSync(e) => {
             transform_expr(e, js_imports, extern_func_to_js, local_name_to_js, tracker);

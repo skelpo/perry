@@ -954,33 +954,48 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     for obj_path in &obj_paths {
         cmd.arg(obj_path);
     }
-    cmd.arg(&runtime_lib);
 
-    // Add stdlib library if available (needed for native module support like mysql2)
-    if let Some(ref stdlib) = stdlib_lib {
-        cmd.arg(stdlib);
-    }
+    // Link libraries carefully to avoid duplicate symbols.
+    // All three libraries (runtime, stdlib, jsruntime) contain perry-runtime symbols
+    // because Rust staticlib embeds all dependencies.
+    //
+    // To avoid duplicates:
+    // - If jsruntime is used: link only jsruntime + stdlib (jsruntime has runtime)
+    // - If only stdlib: link only stdlib (it has runtime)
+    // - If neither: link only runtime
+    //
+    // Note: When both jsruntime and stdlib are needed, they both contain runtime,
+    // so we use -Wl,-allow_sub_type_mismatches to ignore the duplicates.
 
-    // Add jsruntime library if V8 support is enabled
+
+    // Link libraries - avoid duplicates by linking only one library with runtime symbols.
+    // jsruntime now includes stdlib, which includes runtime.
+    // So we only need to link ONE of: jsruntime, stdlib, or runtime.
     if let Some(ref jsruntime) = jsruntime_lib {
+        // jsruntime includes stdlib and runtime - link only jsruntime
         cmd.arg(jsruntime);
+    } else if let Some(ref stdlib) = stdlib_lib {
+        // stdlib includes runtime - link only stdlib
+        cmd.arg(stdlib);
+    } else {
+        // No stdlib or jsruntime - link runtime directly
+        cmd.arg(&runtime_lib);
     }
 
     cmd.arg("-o")
         .arg(&exe_path)
         .arg("-lc");
 
-    // On macOS, we need additional frameworks for tokio/networking/sqlx/V8
+    // On macOS, we need additional frameworks for the runtime (sysinfo, etc.) and V8
     #[cfg(target_os = "macos")]
     {
-        if stdlib_lib.is_some() || jsruntime_lib.is_some() {
-            cmd.arg("-framework").arg("Security")
-               .arg("-framework").arg("CoreFoundation")
-               .arg("-framework").arg("SystemConfiguration")
-               .arg("-framework").arg("IOKit")
-               .arg("-liconv")
-               .arg("-lresolv");
-        }
+        // Always link CoreFoundation and related frameworks since perry-runtime uses sysinfo
+        cmd.arg("-framework").arg("Security")
+           .arg("-framework").arg("CoreFoundation")
+           .arg("-framework").arg("SystemConfiguration")
+           .arg("-framework").arg("IOKit")
+           .arg("-liconv")
+           .arg("-lresolv");
 
         // V8 requires additional C++ runtime
         if jsruntime_lib.is_some() {

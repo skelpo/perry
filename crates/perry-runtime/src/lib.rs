@@ -58,4 +58,4 @@ pub use string::js_string_from_bytes;
 pub use promise::{js_promise_new, js_promise_resolve, js_promise_reject};
 pub use bigint::js_bigint_from_string;
 pub use value::js_nanbox_get_pointer;
-pub use value::{js_set_handle_array_get, js_set_handle_array_length, js_set_handle_object_get_property};
+pub use value::{js_set_handle_array_get, js_set_handle_array_length, js_set_handle_object_get_property, js_set_handle_to_string};

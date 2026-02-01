@@ -638,6 +638,8 @@ pub enum Expr {
 
     // Environment variable access: process.env.VARNAME
     EnvGet(String),
+    // Dynamic environment variable access: process.env[expr]
+    EnvGetDynamic(Box<Expr>),
     // Process uptime: process.uptime() -> number (seconds)
     ProcessUptime,
     // Process current working directory: process.cwd() -> string

@@ -2828,6 +2828,18 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                     param_types: Vec::new(),
                     return_type: Type::Any,
                 })
+            } else if name == "undefined" {
+                // Global undefined identifier
+                Ok(Expr::Undefined)
+            } else if name == "null" {
+                // Global null identifier (though typically written as literal)
+                Ok(Expr::Null)
+            } else if name == "NaN" {
+                // Global NaN identifier
+                Ok(Expr::Number(f64::NAN))
+            } else if name == "Infinity" {
+                // Global Infinity identifier
+                Ok(Expr::Number(f64::INFINITY))
             } else {
                 // Assume it's a global (like console)
                 Ok(Expr::GlobalGet(0)) // TODO: proper global lookup
@@ -4334,16 +4346,25 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                 }
             }
 
-            // Check if this is a process.env.VARNAME access
+            // Check if this is a process.env.VARNAME or process.env[expr] access
             if let ast::Expr::Member(inner_member) = member.obj.as_ref() {
                 if let ast::Expr::Ident(obj_ident) = inner_member.obj.as_ref() {
                     if obj_ident.sym.as_ref() == "process" {
                         if let ast::MemberProp::Ident(prop_ident) = &inner_member.prop {
                             if prop_ident.sym.as_ref() == "env" {
-                                // This is process.env.VARNAME
-                                if let ast::MemberProp::Ident(var_ident) = &member.prop {
-                                    let var_name = var_ident.sym.to_string();
-                                    return Ok(Expr::EnvGet(var_name));
+                                // This is process.env access
+                                match &member.prop {
+                                    ast::MemberProp::Ident(var_ident) => {
+                                        // process.env.VARNAME (static key)
+                                        let var_name = var_ident.sym.to_string();
+                                        return Ok(Expr::EnvGet(var_name));
+                                    }
+                                    ast::MemberProp::Computed(computed) => {
+                                        // process.env[expr] (dynamic key)
+                                        let key_expr = Box::new(lower_expr(ctx, &computed.expr)?);
+                                        return Ok(Expr::EnvGetDynamic(key_expr));
+                                    }
+                                    _ => {}
                                 }
                             }
                         }

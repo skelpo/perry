@@ -5,9 +5,17 @@
 use crate::string::{js_string_from_bytes, StringHeader};
 use std::alloc::{alloc, Layout};
 
+/// Object type tag for runtime type discrimination
+pub const OBJECT_TYPE_REGULAR: u32 = 1;
+pub const OBJECT_TYPE_ERROR: u32 = 2;
+
 /// Error object header
 #[repr(C)]
 pub struct ErrorHeader {
+    /// Type tag to distinguish from regular objects (must be first field!)
+    pub object_type: u32,
+    /// Padding for alignment
+    pub _padding: u32,
     /// Error message as a string pointer
     pub message: *mut StringHeader,
     /// Error name (e.g., "Error", "TypeError")
@@ -25,6 +33,10 @@ pub extern "C" fn js_error_new() -> *mut ErrorHeader {
         if ptr.is_null() {
             panic!("Failed to allocate Error");
         }
+
+        // Set type tag to identify as Error object
+        (*ptr).object_type = OBJECT_TYPE_ERROR;
+        (*ptr)._padding = 0;
 
         // Create empty message
         let empty_msg = js_string_from_bytes(b"".as_ptr(), 0);
@@ -48,6 +60,10 @@ pub extern "C" fn js_error_new_with_message(message: *mut StringHeader) -> *mut 
         if ptr.is_null() {
             panic!("Failed to allocate Error");
         }
+
+        // Set type tag to identify as Error object
+        (*ptr).object_type = OBJECT_TYPE_ERROR;
+        (*ptr)._padding = 0;
 
         let error_name = js_string_from_bytes(b"Error".as_ptr(), 5);
         let stack = js_string_from_bytes(b"".as_ptr(), 0);

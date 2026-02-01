@@ -2300,6 +2300,19 @@ impl Compiler {
             self.extern_funcs.insert("js_nanbox_get_pointer".to_string(), func_id);
         }
 
+        // Declare js_is_truthy(f64) -> i32 (check if value is truthy in JavaScript terms)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed value
+            sig.returns.push(AbiParam::new(types::I32)); // 1 if truthy, 0 if falsy
+            let func_id = self.module.declare_function(
+                "js_is_truthy",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_is_truthy".to_string(), func_id);
+        }
+
         // Declare js_object_alloc(class_id: i32, field_count: i32) -> *mut ObjectHeader (i64)
         {
             let mut sig = self.module.make_signature();
@@ -2442,6 +2455,19 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_object_keys".to_string(), func_id);
+        }
+
+        // js_dynamic_object_keys(ptr: i64) -> *mut ArrayHeader (handles Error objects too)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // object pointer
+            sig.returns.push(AbiParam::new(types::I64)); // array pointer
+            let func_id = self.module.declare_function(
+                "js_dynamic_object_keys",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_dynamic_object_keys".to_string(), func_id);
         }
 
         // js_object_values(obj: i64) -> *mut ArrayHeader (array of values)
@@ -2926,6 +2952,36 @@ impl Compiler {
             self.extern_funcs.insert("js_array_findIndex".to_string(), func_id);
         }
 
+        // js_dynamic_array_find(arr_value: f64, callback: *const ClosureHeader) -> f64
+        // Handles both JS handle arrays and native arrays
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // array value (may be NaN-boxed or JS handle)
+            sig.params.push(AbiParam::new(types::I64)); // callback closure pointer
+            sig.returns.push(AbiParam::new(types::F64)); // element or NaN if not found
+            let func_id = self.module.declare_function(
+                "js_dynamic_array_find",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_dynamic_array_find".to_string(), func_id);
+        }
+
+        // js_dynamic_array_findIndex(arr_value: f64, callback: *const ClosureHeader) -> f64
+        // Handles both JS handle arrays and native arrays
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // array value (may be NaN-boxed or JS handle)
+            sig.params.push(AbiParam::new(types::I64)); // callback closure pointer
+            sig.returns.push(AbiParam::new(types::F64)); // index as f64 or -1.0
+            let func_id = self.module.declare_function(
+                "js_dynamic_array_findIndex",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_dynamic_array_findIndex".to_string(), func_id);
+        }
+
         // js_array_reduce(arr, callback, has_initial, initial) -> f64
         {
             let mut sig = self.module.make_signature();
@@ -3220,6 +3276,20 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_jsvalue_to_string".to_string(), func_id);
+        }
+
+        // js_ensure_string_ptr(value: f64) -> i64
+        // Ensures a value is a native string pointer - handles raw pointers, NaN-boxed strings, and JS handles
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // value (may be raw pointer, NaN-boxed, or JS handle)
+            sig.returns.push(AbiParam::new(types::I64)); // string pointer
+            let func_id = self.module.declare_function(
+                "js_ensure_string_ptr",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_ensure_string_ptr".to_string(), func_id);
         }
 
         // js_string_slice(s: *const StringHeader, start: i32, end: i32) -> *mut StringHeader
@@ -7824,6 +7894,17 @@ impl Compiler {
             self.extern_funcs.insert("js_string_equals".to_string(), func_id);
         }
 
+        // js_dynamic_string_equals(a: f64, b: f64) -> i32
+        // Compares strings that may be NaN-boxed (from PropertyGet) or raw pointers (from literals)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // a value (may be NaN-boxed or raw)
+            sig.params.push(AbiParam::new(types::F64)); // b value (may be NaN-boxed or raw)
+            sig.returns.push(AbiParam::new(types::I32)); // bool (i32)
+            let func_id = self.module.declare_function("js_dynamic_string_equals", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_dynamic_string_equals".to_string(), func_id);
+        }
+
         // js_parse_int(str: i64, radix: f64) -> f64
         {
             let mut sig = self.module.make_signature();
@@ -8279,12 +8360,13 @@ impl Compiler {
                 if !is_block_filled(&builder, current_block) {
                     let promise_ptr = builder.use_var(promise_var.unwrap());
 
-                    // Resolve with undefined (0.0)
+                    // Resolve with undefined
                     let resolve_func = self.extern_funcs.get("js_promise_resolve")
                         .ok_or_else(|| anyhow!("js_promise_resolve not declared"))?;
                     let resolve_ref = self.module.declare_func_in_func(*resolve_func, builder.func);
-                    let zero = builder.ins().f64const(0.0);
-                    builder.ins().call(resolve_ref, &[promise_ptr, zero]);
+                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                    let undef_val = builder.ins().f64const(f64::from_bits(TAG_UNDEFINED));
+                    builder.ins().call(resolve_ref, &[promise_ptr, undef_val]);
 
                     builder.ins().return_(&[promise_ptr]);
                 }
@@ -8818,6 +8900,10 @@ impl Compiler {
             // File system operations
             Expr::FsReadFileSync(path) | Expr::FsExistsSync(path) | Expr::FsMkdirSync(path) | Expr::FsUnlinkSync(path) => {
                 self.collect_closures_from_expr(path, closures, enclosing_class);
+            }
+            // Dynamic environment variable access
+            Expr::EnvGetDynamic(key_expr) => {
+                self.collect_closures_from_expr(key_expr, closures, enclosing_class);
             }
             Expr::FsWriteFileSync(path, content) | Expr::FsAppendFileSync(path, content) => {
                 self.collect_closures_from_expr(path, closures, enclosing_class);
@@ -9742,6 +9828,9 @@ impl Compiler {
         let original_func_id = *self.func_ids.get(&func_id)
             .ok_or_else(|| anyhow!("Original function not found: {}", func_id))?;
 
+        // Get js_nanbox_get_pointer for extracting pointers from NaN-boxed values
+        let nanbox_get_ptr_id = self.extern_funcs.get("js_nanbox_get_pointer").copied();
+
         // Compile the wrapper function
         self.ctx.func.signature = sig;
 
@@ -9755,15 +9844,25 @@ impl Compiler {
 
             // Skip the closure_ptr (param 0) and forward the rest to the original function
             // Need to convert f64 wrapper params to the types the original function expects
+            // For cross-module calls, i64 params are now properly NaN-boxed, so we need to
+            // extract the pointer using js_nanbox_get_pointer instead of simple bitcast.
             // Copy block params to a Vec first to avoid borrow conflict
             let block_params: Vec<Value> = builder.block_params(entry_block).to_vec();
             let mut call_args: Vec<Value> = Vec::new();
             for (i, expected_type) in param_expected_types.iter().enumerate() {
                 let wrapper_param = block_params[i + 1]; // +1 to skip closure_ptr
                 if *expected_type == types::I64 {
-                    // Original function expects i64, wrapper has f64 - bitcast
-                    let converted = builder.ins().bitcast(types::I64, MemFlags::new(), wrapper_param);
-                    call_args.push(converted);
+                    // Original function expects i64, wrapper has f64 (NaN-boxed pointer)
+                    // Use js_nanbox_get_pointer to properly extract the pointer
+                    if let Some(get_ptr_id) = nanbox_get_ptr_id {
+                        let get_ptr_ref = self.module.declare_func_in_func(get_ptr_id, builder.func);
+                        let call = builder.ins().call(get_ptr_ref, &[wrapper_param]);
+                        call_args.push(builder.inst_results(call)[0]);
+                    } else {
+                        // Fallback to bitcast if js_nanbox_get_pointer not available
+                        let converted = builder.ins().bitcast(types::I64, MemFlags::new(), wrapper_param);
+                        call_args.push(converted);
+                    }
                 } else {
                     // Same type (f64), pass directly
                     call_args.push(wrapper_param);
@@ -10116,7 +10215,7 @@ fn compile_async_stmt(
             fn is_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
-                    Expr::EnvGet(_) | Expr::FsReadFileSync(_) => true,
+                    Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                     Expr::NativeMethodCall { module, method, .. } => {
                         (module == "path" && matches!(method.as_str(), "dirname" | "basename" | "extname" | "join" | "resolve"))
@@ -10191,8 +10290,9 @@ fn compile_async_stmt(
             let resolve_func = extern_funcs.get("js_promise_resolve")
                 .ok_or_else(|| anyhow!("js_promise_resolve not declared"))?;
             let resolve_ref = module.declare_func_in_func(*resolve_func, builder.func);
-            let zero = builder.ins().f64const(0.0);
-            builder.ins().call(resolve_ref, &[promise_ptr, zero]);
+            const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+            let undef_val = builder.ins().f64const(f64::from_bits(TAG_UNDEFINED));
+            builder.ins().call(resolve_ref, &[promise_ptr, undef_val]);
 
             builder.ins().return_(&[promise_ptr]);
             Ok(())
@@ -10201,8 +10301,14 @@ fn compile_async_stmt(
         Stmt::If { condition, then_branch, else_branch } => {
             let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, condition, None)?;
             let cond_val = ensure_f64(builder, cond_val_raw);
-            let zero = builder.ins().f64const(0.0);
-            let cond_bool = builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
+            // Use js_is_truthy for proper JavaScript truthiness semantics
+            let truthy_func = extern_funcs.get("js_is_truthy")
+                .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+            let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+            let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
+            let truthy_result = builder.inst_results(truthy_call)[0];
+            let zero_i32 = builder.ins().iconst(types::I32, 0);
+            let cond_bool = builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32);
 
             let then_block = builder.create_block();
             let else_block = builder.create_block();
@@ -10653,9 +10759,9 @@ fn compile_stmt(
             // Await results are NaN-boxed and need dynamic typeof handling
             let is_await_init = matches!(init, Some(Expr::Await(_)));
 
-            // Check if initialized from EnvGet (process.env.VAR)
-            // EnvGet returns a NaN-boxed value: string if the env var exists, undefined if not
-            let is_envget_init = matches!(init, Some(Expr::EnvGet(_)));
+            // Check if initialized from EnvGet/EnvGetDynamic (process.env.VAR or process.env[key])
+            // EnvGet/EnvGetDynamic returns a NaN-boxed value: string if the env var exists, undefined if not
+            let is_envget_init = matches!(init, Some(Expr::EnvGet(_)) | Some(Expr::EnvGetDynamic(_)));
 
             // Check if initialized from IndexGet (array element access)
             // Array elements from mixed/union arrays are NaN-boxed and need dynamic handling
@@ -10810,16 +10916,19 @@ fn compile_stmt(
                     builder.def_var(var, val);
                 }
             } else {
-                // Initialize to 0/undefined
+                // Initialize to undefined/null/0 depending on the type
                 if is_pointer && !is_union {
+                    // Raw pointer type - use null pointer (0)
                     let zero = builder.ins().iconst(types::I64, 0);
                     builder.def_var(var, zero);
                 } else if should_use_i32 {
                     let zero = builder.ins().iconst(types::I32, 0);
                     builder.def_var(var, zero);
                 } else {
-                    let zero = builder.ins().f64const(0.0);
-                    builder.def_var(var, zero);
+                    // f64 type - use TAG_UNDEFINED for proper JavaScript semantics
+                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                    let undef = builder.ins().f64const(f64::from_bits(TAG_UNDEFINED));
+                    builder.def_var(var, undef);
                 }
             }
 
@@ -10867,11 +10976,16 @@ fn compile_stmt(
         }
         Stmt::If { condition, then_branch, else_branch } => {
             let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, condition, this_ctx)?;
-            // Ensure cond_val is f64 for fcmp (might be i64 if it's a pointer)
+            // Ensure cond_val is f64 for js_is_truthy
             let cond_val = ensure_f64(builder, cond_val_raw);
-            // Convert f64 to bool (non-zero is true)
-            let zero = builder.ins().f64const(0.0);
-            let cond_bool = builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
+            // Use js_is_truthy for proper JavaScript truthiness semantics
+            let truthy_func = extern_funcs.get("js_is_truthy")
+                .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+            let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+            let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
+            let truthy_result = builder.inst_results(truthy_call)[0];
+            let zero_i32 = builder.ins().iconst(types::I32, 0);
+            let cond_bool = builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32);
 
             let then_block = builder.create_block();
             let else_block = builder.create_block();
@@ -11250,14 +11364,24 @@ fn compile_stmt(
                             } else {
                                 let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, condition, this_ctx)?;
                                 let cond_val = ensure_f64(builder, cond_val_raw);
-                                let zero = builder.ins().f64const(0.0);
-                                builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero)
+                                let truthy_func = extern_funcs.get("js_is_truthy")
+                                    .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                                let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                                let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
+                                let truthy_result = builder.inst_results(truthy_call)[0];
+                                let zero_i32 = builder.ins().iconst(types::I32, 0);
+                                builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
                             }
                         } else {
                             let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, condition, this_ctx)?;
                             let cond_val = ensure_f64(builder, cond_val_raw);
-                            let zero = builder.ins().f64const(0.0);
-                            builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero)
+                            let truthy_func = extern_funcs.get("js_is_truthy")
+                                .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                            let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                            let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
+                            let truthy_result = builder.inst_results(truthy_call)[0];
+                            let zero_i32 = builder.ins().iconst(types::I32, 0);
+                            builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
                         }
                     }
                     // AND condition: ... && iter < limit
@@ -11265,11 +11389,16 @@ fn compile_stmt(
                         if let Expr::Compare { op: CompareOp::Lt, left: cmp_left, .. } = right.as_ref() {
                             if let Expr::LocalGet(id) = cmp_left.as_ref() {
                                 if *id == counter_id {
-                                    // Compile left side normally
+                                    // Compile left side normally - use js_is_truthy
                                     let left_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, left, this_ctx)?;
                                     let left_val = ensure_f64(builder, left_val_raw);
-                                    let zero = builder.ins().f64const(0.0);
-                                    let left_bool = builder.ins().fcmp(FloatCC::NotEqual, left_val, zero);
+                                    let truthy_func = extern_funcs.get("js_is_truthy")
+                                        .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                                    let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                                    let truthy_call = builder.ins().call(truthy_ref, &[left_val]);
+                                    let truthy_result = builder.inst_results(truthy_call)[0];
+                                    let zero_i32 = builder.ins().iconst(types::I32, 0);
+                                    let left_bool = builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32);
 
                                     // Use icmp for counter comparison
                                     let counter_i32 = builder.use_var(i32_var);
@@ -11281,27 +11410,47 @@ fn compile_stmt(
                                 } else {
                                     let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, condition, this_ctx)?;
                                     let cond_val = ensure_f64(builder, cond_val_raw);
-                                    let zero = builder.ins().f64const(0.0);
-                                    builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero)
+                                    let truthy_func = extern_funcs.get("js_is_truthy")
+                                        .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                                    let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                                    let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
+                                    let truthy_result = builder.inst_results(truthy_call)[0];
+                                    let zero_i32 = builder.ins().iconst(types::I32, 0);
+                                    builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
                                 }
                             } else {
                                 let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, condition, this_ctx)?;
                                 let cond_val = ensure_f64(builder, cond_val_raw);
-                                let zero = builder.ins().f64const(0.0);
-                                builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero)
+                                let truthy_func = extern_funcs.get("js_is_truthy")
+                                    .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                                let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                                let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
+                                let truthy_result = builder.inst_results(truthy_call)[0];
+                                let zero_i32 = builder.ins().iconst(types::I32, 0);
+                                builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
                             }
                         } else {
                             let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, condition, this_ctx)?;
                             let cond_val = ensure_f64(builder, cond_val_raw);
-                            let zero = builder.ins().f64const(0.0);
-                            builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero)
+                            let truthy_func = extern_funcs.get("js_is_truthy")
+                                .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                            let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                            let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
+                            let truthy_result = builder.inst_results(truthy_call)[0];
+                            let zero_i32 = builder.ins().iconst(types::I32, 0);
+                            builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
                         }
                     }
                     _ => {
                         let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, condition, this_ctx)?;
                         let cond_val = ensure_f64(builder, cond_val_raw);
-                        let zero = builder.ins().f64const(0.0);
-                        builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero)
+                        let truthy_func = extern_funcs.get("js_is_truthy")
+                            .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                        let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                        let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
+                        let truthy_result = builder.inst_results(truthy_call)[0];
+                        let zero_i32 = builder.ins().iconst(types::I32, 0);
+                        builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
                     }
                 };
                 builder.ins().brif(cond_bool, body_block, &[], exit_block, &[]);
@@ -11309,8 +11458,13 @@ fn compile_stmt(
                 // Non-optimized path
                 let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, condition, this_ctx)?;
                 let cond_val = ensure_f64(builder, cond_val_raw);
-                let zero = builder.ins().f64const(0.0);
-                let cond_bool = builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
+                let truthy_func = extern_funcs.get("js_is_truthy")
+                    .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
+                let truthy_result = builder.inst_results(truthy_call)[0];
+                let zero_i32 = builder.ins().iconst(types::I32, 0);
+                let cond_bool = builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32);
                 builder.ins().brif(cond_bool, body_block, &[], exit_block, &[]);
             }
 
@@ -12459,15 +12613,25 @@ fn compile_stmt(
                         } else {
                             let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, cond, this_ctx)?;
                             let cond_val = ensure_f64(builder, cond_val_raw);
-                            let zero = builder.ins().f64const(0.0);
-                            let cond_bool = builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
+                            let truthy_func = extern_funcs.get("js_is_truthy")
+                                .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                            let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                            let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
+                            let truthy_result = builder.inst_results(truthy_call)[0];
+                            let zero_i32 = builder.ins().iconst(types::I32, 0);
+                            let cond_bool = builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32);
                             builder.ins().brif(cond_bool, body_block, &[], exit_block, &[]);
                         }
                     } else {
                         let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, cond, this_ctx)?;
                         let cond_val = ensure_f64(builder, cond_val_raw);
-                        let zero = builder.ins().f64const(0.0);
-                        let cond_bool = builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
+                        let truthy_func = extern_funcs.get("js_is_truthy")
+                            .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                        let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                        let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
+                        let truthy_result = builder.inst_results(truthy_call)[0];
+                        let zero_i32 = builder.ins().iconst(types::I32, 0);
+                        let cond_bool = builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32);
                         builder.ins().brif(cond_bool, body_block, &[], exit_block, &[]);
                     }
                 } else {
@@ -12544,8 +12708,20 @@ fn compile_stmt(
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, expr, this_ctx)?;
 
             // Call js_throw(value) - this function never returns (uses longjmp)
-            // js_throw expects f64, so ensure we convert i64 if needed
-            let val_f64 = ensure_f64(builder, val);
+            // js_throw expects f64. If the value is an i64 (pointer), we need to NaN-box it
+            // so that the catch block can correctly identify it as an object.
+            let val_type = builder.func.dfg.value_type(val);
+            let val_f64 = if val_type == types::I64 {
+                // i64 pointer - NaN-box it as an object
+                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let call = builder.ins().call(nanbox_ref, &[val]);
+                builder.inst_results(call)[0]
+            } else {
+                // Already f64 (number, NaN-boxed value, etc.)
+                val
+            };
             let throw_func = extern_funcs.get("js_throw")
                 .ok_or_else(|| anyhow!("js_throw not declared"))?;
             let throw_ref = module.declare_func_in_func(*throw_func, builder.func);
@@ -12756,7 +12932,8 @@ fn compile_stmt(
                         is_bigint: false,
                         is_closure: false,
                         is_boxed: false,
-                        is_map: false, is_set: false, is_buffer: false, is_union: false,
+                        // Caught exceptions can be any type, so mark as union for runtime type checking
+                        is_map: false, is_set: false, is_buffer: false, is_union: true,
                         is_mixed_array: false,
                         is_integer: false,
                         is_integer_array: false,
@@ -12958,7 +13135,7 @@ fn compile_expr(
             let len = bytes.len();
 
             if len == 0 {
-                // Empty string - return f64 (bitcast pointer)
+                // Empty string - allocate and NaN-box
                 let alloc_func = extern_funcs.get("js_string_from_bytes")
                     .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
                 let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
@@ -12966,7 +13143,12 @@ fn compile_expr(
                 let zero_len = builder.ins().iconst(types::I32, 0);
                 let call = builder.ins().call(alloc_ref, &[null_ptr, zero_len]);
                 let str_ptr = builder.inst_results(call)[0];
-                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), str_ptr));
+                // NaN-box the string pointer for proper type identification
+                let nanbox_func = extern_funcs.get("js_nanbox_string")
+                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[str_ptr]);
+                return Ok(builder.inst_results(nanbox_call)[0]);
             }
 
             // Create a stack slot for the string bytes
@@ -12995,14 +13177,19 @@ fn compile_expr(
             // Get the stack slot address
             let slot_addr = builder.ins().stack_addr(types::I64, slot, 0);
 
-            // Call js_string_from_bytes - convert to f64 for ABI
+            // Call js_string_from_bytes to allocate the string
             let alloc_func = extern_funcs.get("js_string_from_bytes")
                 .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
             let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
             let len_val = builder.ins().iconst(types::I32, len as i64);
             let call = builder.ins().call(alloc_ref, &[slot_addr, len_val]);
             let str_ptr = builder.inst_results(call)[0];
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), str_ptr))
+            // NaN-box the string pointer for proper type identification
+            let nanbox_func = extern_funcs.get("js_nanbox_string")
+                .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+            let nanbox_call = builder.ins().call(nanbox_ref, &[str_ptr]);
+            Ok(builder.inst_results(nanbox_call)[0])
         }
         Expr::BigInt(s) => {
             // Create a BigInt from the string representation
@@ -13251,6 +13438,60 @@ fn compile_expr(
             let result = builder.block_params(merge_block)[0];
             Ok(result)
         }
+        Expr::EnvGetDynamic(key_expr) => {
+            // Compile the key expression to get the env var name
+            let key_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, key_expr, this_ctx)?;
+
+            // The key is a string - extract the string pointer
+            // It might be NaN-boxed if it came from a cross-module call or other sources
+            let key_f64 = ensure_f64(builder, key_val);
+            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+            let call = builder.ins().call(get_str_ptr_ref, &[key_f64]);
+            let name_str_ptr = builder.inst_results(call)[0];
+
+            // Call js_getenv with the string pointer
+            let getenv_func = extern_funcs.get("js_getenv")
+                .ok_or_else(|| anyhow!("js_getenv not declared"))?;
+            let getenv_ref = module.declare_func_in_func(*getenv_func, builder.func);
+            let call = builder.ins().call(getenv_ref, &[name_str_ptr]);
+            let result_ptr = builder.inst_results(call)[0];
+
+            // Check if result is null (env var not found)
+            let zero = builder.ins().iconst(types::I64, 0);
+            let is_null = builder.ins().icmp(IntCC::Equal, result_ptr, zero);
+
+            // Create blocks for the conditional
+            let found_block = builder.create_block();
+            let not_found_block = builder.create_block();
+            let merge_block = builder.create_block();
+            builder.append_block_param(merge_block, types::F64);
+
+            builder.ins().brif(is_null, not_found_block, &[], found_block, &[]);
+
+            // Not found block: return undefined
+            builder.switch_to_block(not_found_block);
+            builder.seal_block(not_found_block);
+            let undefined_val = builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001_u64));
+            builder.ins().jump(merge_block, &[undefined_val]);
+
+            // Found block: NaN-box the string pointer
+            builder.switch_to_block(found_block);
+            builder.seal_block(found_block);
+            let nanbox_func = extern_funcs.get("js_nanbox_string")
+                .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+            let call = builder.ins().call(nanbox_ref, &[result_ptr]);
+            let nanboxed_val = builder.inst_results(call)[0];
+            builder.ins().jump(merge_block, &[nanboxed_val]);
+
+            // Merge block: return the result
+            builder.switch_to_block(merge_block);
+            builder.seal_block(merge_block);
+            let result = builder.block_params(merge_block)[0];
+            Ok(result)
+        }
         Expr::FsReadFileSync(path_expr) => {
             // Compile the path expression
             let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, path_expr, this_ctx)?;
@@ -13436,7 +13677,7 @@ fn compile_expr(
                 match expr {
                     Expr::String(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
-                    Expr::EnvGet(_) | Expr::FsReadFileSync(_) |
+                    Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) |
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                     Expr::PathExtname(_) | Expr::PathResolve(_) => true,
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
@@ -14196,9 +14437,15 @@ fn compile_expr(
                 let call = builder.ins().call(string_concat_ref, &[result, key_str]);
                 result = builder.inst_results(call)[0];
 
-                // Compile and add the value
+                // Compile and add the value - use js_ensure_string_ptr to handle all string types
                 let val_compiled = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, val, this_ctx)?;
-                let val_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val_compiled);
+                let val_f64 = ensure_f64(builder, val_compiled);
+                // Convert to native string pointer - handles raw pointers, NaN-boxed strings, and JS handles
+                let ensure_str_func = extern_funcs.get("js_ensure_string_ptr")
+                    .ok_or_else(|| anyhow!("js_ensure_string_ptr not declared"))?;
+                let ensure_str_ref = module.declare_func_in_func(*ensure_str_func, builder.func);
+                let call = builder.ins().call(ensure_str_ref, &[val_f64]);
+                let val_ptr = builder.inst_results(call)[0];
                 let call = builder.ins().call(string_concat_ref, &[result, val_ptr]);
                 result = builder.inst_results(call)[0];
 
@@ -14384,7 +14631,12 @@ fn compile_expr(
                     let func_ref = module.declare_func_in_func(*func, builder.func);
                     let call = builder.ins().call(func_ref, &[]);
                     let error_ptr = builder.inst_results(call)[0];
-                    Ok(builder.ins().bitcast(types::F64, MemFlags::new(), error_ptr))
+                    // NaN-box the error pointer so typeof recognizes it as an object
+                    let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                        .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                    let call = builder.ins().call(nanbox_ref, &[error_ptr]);
+                    Ok(builder.inst_results(call)[0])
                 }
                 Some(msg_expr) => {
                     // new Error(message)
@@ -14395,19 +14647,35 @@ fn compile_expr(
                     let func_ref = module.declare_func_in_func(*func, builder.func);
                     let call = builder.ins().call(func_ref, &[msg_ptr]);
                     let error_ptr = builder.inst_results(call)[0];
-                    Ok(builder.ins().bitcast(types::F64, MemFlags::new(), error_ptr))
+                    // NaN-box the error pointer so typeof recognizes it as an object
+                    let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                        .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                    let call = builder.ins().call(nanbox_ref, &[error_ptr]);
+                    Ok(builder.inst_results(call)[0])
                 }
             }
         }
         Expr::ErrorMessage(error_expr) => {
             let error_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, error_expr, this_ctx)?;
-            let error_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), error_val);
+            // Error is now NaN-boxed, so extract the pointer properly
+            let error_f64 = ensure_f64(builder, error_val);
+            let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+            let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+            let call = builder.ins().call(get_ptr_ref, &[error_f64]);
+            let error_ptr = builder.inst_results(call)[0];
             let func = extern_funcs.get("js_error_get_message")
                 .ok_or_else(|| anyhow!("js_error_get_message not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
             let call = builder.ins().call(func_ref, &[error_ptr]);
             let result_ptr = builder.inst_results(call)[0];
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+            // NaN-box the result string
+            let nanbox_func = extern_funcs.get("js_nanbox_string")
+                .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+            let call = builder.ins().call(nanbox_ref, &[result_ptr]);
+            Ok(builder.inst_results(call)[0])
         }
         // URL operations
         Expr::UrlNew { url, base } => {
@@ -15187,33 +15455,18 @@ fn compile_expr(
             // Compile array and callback
             let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, array, this_ctx)?;
 
-            // Check if array is from a union-typed variable (NaN-boxed)
-            let is_union_array = if let Expr::LocalGet(id) = array.as_ref() {
-                locals.get(id).map(|i| i.is_union).unwrap_or(false)
-            } else {
-                false
-            };
-
-            // Extract pointer from NaN-boxed value if needed
-            let arr_ptr = if is_union_array {
-                let arr_f64 = ensure_f64(builder, arr_val);
-                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
-                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
-                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
-                let call = builder.ins().call(get_ptr_ref, &[arr_f64]);
-                builder.inst_results(call)[0]
-            } else {
-                ensure_i64(builder, arr_val)
-            };
+            // Always use dynamic version which handles both JS handle arrays (from JSON)
+            // and native arrays. The array is passed as f64 (may be NaN-boxed or JS handle).
+            let arr_f64 = ensure_f64(builder, arr_val);
 
             let cb_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, callback, this_ctx)?;
             // Ensure callback is i64 (closure pointer)
             let cb_ptr = ensure_i64(builder, cb_val);
 
-            let func = extern_funcs.get("js_array_find")
-                .ok_or_else(|| anyhow!("js_array_find not declared"))?;
+            let func = extern_funcs.get("js_dynamic_array_find")
+                .ok_or_else(|| anyhow!("js_dynamic_array_find not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
-            let call = builder.ins().call(func_ref, &[arr_ptr, cb_ptr]);
+            let call = builder.ins().call(func_ref, &[arr_f64, cb_ptr]);
             let result = builder.inst_results(call)[0];
 
             // Result is f64 (element or NaN for undefined)
@@ -15223,37 +15476,20 @@ fn compile_expr(
             // Compile array and callback
             let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, array, this_ctx)?;
 
-            // Check if array is from a union-typed variable (NaN-boxed)
-            let is_union_array = if let Expr::LocalGet(id) = array.as_ref() {
-                locals.get(id).map(|i| i.is_union).unwrap_or(false)
-            } else {
-                false
-            };
-
-            // Extract pointer from NaN-boxed value if needed
-            let arr_ptr = if is_union_array {
-                let arr_f64 = ensure_f64(builder, arr_val);
-                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
-                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
-                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
-                let call = builder.ins().call(get_ptr_ref, &[arr_f64]);
-                builder.inst_results(call)[0]
-            } else {
-                ensure_i64(builder, arr_val)
-            };
+            // Always use dynamic version which handles both JS handle arrays (from JSON)
+            // and native arrays. The array is passed as f64 (may be NaN-boxed or JS handle).
+            let arr_f64 = ensure_f64(builder, arr_val);
 
             let cb_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, callback, this_ctx)?;
             // Ensure callback is i64 (closure pointer)
             let cb_ptr = ensure_i64(builder, cb_val);
 
-            let func = extern_funcs.get("js_array_findIndex")
-                .ok_or_else(|| anyhow!("js_array_findIndex not declared"))?;
+            let func = extern_funcs.get("js_dynamic_array_findIndex")
+                .ok_or_else(|| anyhow!("js_dynamic_array_findIndex not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
-            let call = builder.ins().call(func_ref, &[arr_ptr, cb_ptr]);
-            let result = builder.inst_results(call)[0];
-
-            // Convert i32 result to f64
-            Ok(builder.ins().fcvt_from_sint(types::F64, result))
+            let call = builder.ins().call(func_ref, &[arr_f64, cb_ptr]);
+            // Result is already f64 from the dynamic version
+            Ok(builder.inst_results(call)[0])
         }
         Expr::ArrayReduce { array, callback, initial } => {
             // Compile array and callback
@@ -15691,7 +15927,7 @@ fn compile_expr(
             fn is_string_expr_for_union(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
-                    Expr::EnvGet(_) => true,
+                    Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
                     Expr::FsReadFileSync(_) => true,
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                     Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::JsonStringify(_) => true,
@@ -16017,6 +16253,8 @@ fn compile_expr(
             fn is_union_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union).unwrap_or(false),
+                    // EnvGet returns NaN-boxed string or undefined - treat as union
+                    Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
                     Expr::PropertyGet { object, property } if property != "length" => {
                         // PropertyGet on non-class objects returns NaN-boxed values
                         if let Expr::LocalGet(id) = object.as_ref() {
@@ -16533,22 +16771,35 @@ fn compile_expr(
             let is_null_compare = matches!(left.as_ref(), Expr::Null | Expr::Undefined)
                 || matches!(right.as_ref(), Expr::Null | Expr::Undefined);
 
-            // Check if this is a string comparison (typeof x === "string" or similar)
+            // Check if this is a string comparison
             // String comparison is needed when:
             // - One side is a TypeOf expression (always returns string)
             // - One side is a string literal
             // - One side is a string local variable
-            let is_string_compare = {
-                fn is_string_expr_for_compare(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
-                    match expr {
-                        Expr::TypeOf(_) => true,
-                        Expr::String(_) => true,
-                        Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
-                        _ => false,
-                    }
+            // - One side is a PropertyGet (might return a NaN-boxed string)
+            fn is_known_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                match expr {
+                    Expr::TypeOf(_) => true,
+                    Expr::String(_) => true,
+                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                    _ => false,
                 }
-                is_string_expr_for_compare(left, locals) && is_string_expr_for_compare(right, locals)
-            };
+            }
+            fn may_be_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                match expr {
+                    Expr::PropertyGet { .. } => true,
+                    Expr::IndexGet { .. } => true,
+                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union || i.is_string).unwrap_or(false),
+                    _ => is_known_string_expr(expr, locals),
+                }
+            }
+
+            // Static string comparison: both sides are known strings (no NaN-boxing involved)
+            let is_static_string_compare = is_known_string_expr(left, locals) && is_known_string_expr(right, locals);
+            // Dynamic string comparison: one side is a string literal/known string, other might be NaN-boxed
+            let is_dynamic_string_compare = !is_static_string_compare &&
+                (is_known_string_expr(left, locals) && may_be_string_expr(right, locals)) ||
+                (may_be_string_expr(left, locals) && is_known_string_expr(right, locals));
 
             let lhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, left, this_ctx)?;
             let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, right, this_ctx)?;
@@ -16561,8 +16812,8 @@ fn compile_expr(
             let one = builder.ins().f64const(1.0);
             let zero = builder.ins().f64const(0.0);
 
-            if is_string_compare && (*op == CompareOp::Eq || *op == CompareOp::Ne) {
-                // String comparison: use js_string_equals
+            if is_static_string_compare && (*op == CompareOp::Eq || *op == CompareOp::Ne) {
+                // Static string comparison: use js_string_equals
                 // Convert f64-bitcasted pointers to i64
                 let lhs_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), lhs);
                 let rhs_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), rhs);
@@ -16571,6 +16822,27 @@ fn compile_expr(
                     .ok_or_else(|| anyhow!("js_string_equals not declared"))?;
                 let equals_ref = module.declare_func_in_func(*equals_func, builder.func);
                 let call = builder.ins().call(equals_ref, &[lhs_ptr, rhs_ptr]);
+                let result = builder.inst_results(call)[0]; // i32 bool
+
+                // Convert to f64 result
+                if *op == CompareOp::Eq {
+                    let cmp = builder.ins().icmp_imm(IntCC::NotEqual, result, 0);
+                    Ok(builder.ins().select(cmp, one, zero))
+                } else {
+                    // Ne
+                    let cmp = builder.ins().icmp_imm(IntCC::Equal, result, 0);
+                    Ok(builder.ins().select(cmp, one, zero))
+                }
+            } else if is_dynamic_string_compare && (*op == CompareOp::Eq || *op == CompareOp::Ne) {
+                // Dynamic string comparison: one side may be NaN-boxed
+                // Use js_dynamic_string_equals which handles both representations
+                let lhs_f64 = ensure_f64(builder, lhs);
+                let rhs_f64 = ensure_f64(builder, rhs);
+
+                let equals_func = extern_funcs.get("js_dynamic_string_equals")
+                    .ok_or_else(|| anyhow!("js_dynamic_string_equals not declared"))?;
+                let equals_ref = module.declare_func_in_func(*equals_func, builder.func);
+                let call = builder.ins().call(equals_ref, &[lhs_f64, rhs_f64]);
                 let result = builder.inst_results(call)[0]; // i32 bool
 
                 // Convert to f64 result
@@ -16622,28 +16894,52 @@ fn compile_expr(
                     let lhs_type = builder.func.dfg.value_type(lhs);
 
                     // Check if lhs is truthy - handle both f64 and i64 types
+                    // Use js_is_truthy for f64 to handle undefined/null/NaN/empty string
                     let (lhs_bool, falsy_val) = if lhs_type == types::I64 {
+                        // For i64 (pointers), null is 0 and non-null objects are truthy
                         let zero_i64 = builder.ins().iconst(types::I64, 0);
                         (builder.ins().icmp(IntCC::NotEqual, lhs, zero_i64), zero_i64)
                     } else {
-                        let zero = builder.ins().f64const(0.0);
-                        (builder.ins().fcmp(FloatCC::NotEqual, lhs, zero), zero)
+                        let lhs_f64 = ensure_f64(builder, lhs);
+                        let truthy_func = extern_funcs.get("js_is_truthy")
+                            .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                        let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                        let truthy_call = builder.ins().call(truthy_ref, &[lhs_f64]);
+                        let truthy_result = builder.inst_results(truthy_call)[0];
+                        let zero_i32 = builder.ins().iconst(types::I32, 0);
+                        let zero_f64 = builder.ins().f64const(0.0);
+                        (builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32), zero_f64)
                     };
 
                     let rhs_block = builder.create_block();
                     let merge_block = builder.create_block();
-                    builder.append_block_param(merge_block, lhs_type);
+                    // Always use F64 for merge block since we need to preserve NaN-boxed values
+                    let merge_type = if lhs_type == types::I64 { types::I64 } else { types::F64 };
+                    builder.append_block_param(merge_block, merge_type);
 
-                    builder.ins().brif(lhs_bool, rhs_block, &[], merge_block, &[falsy_val]);
+                    // For falsy case, pass the original lhs value (not just zero)
+                    let lhs_for_merge = if lhs_type == types::I64 {
+                        lhs
+                    } else {
+                        ensure_f64(builder, lhs)
+                    };
+                    builder.ins().brif(lhs_bool, rhs_block, &[], merge_block, &[lhs_for_merge]);
 
                     builder.switch_to_block(rhs_block);
                     builder.seal_block(rhs_block);
                     let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, right, this_ctx)?;
-                    // Convert rhs to match lhs_type if needed
-                    let rhs_converted = if lhs_type == types::I64 && builder.func.dfg.value_type(rhs) == types::F64 {
+                    // Convert rhs to match merge_type if needed
+                    // For i64->f64 conversion, we need to NaN-box the pointer to preserve type info
+                    let rhs_converted = if merge_type == types::I64 && builder.func.dfg.value_type(rhs) == types::F64 {
                         builder.ins().bitcast(types::I64, MemFlags::new(), rhs)
-                    } else if lhs_type == types::F64 && builder.func.dfg.value_type(rhs) == types::I64 {
-                        builder.ins().bitcast(types::F64, MemFlags::new(), rhs)
+                    } else if merge_type == types::F64 && builder.func.dfg.value_type(rhs) == types::I64 {
+                        // NaN-box the pointer (could be string, object, array, etc.)
+                        // Use js_nanbox_string for strings (most common case from literals)
+                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                        let call = builder.ins().call(nanbox_ref, &[rhs]);
+                        builder.inst_results(call)[0]
                     } else {
                         rhs
                     };
@@ -16659,12 +16955,20 @@ fn compile_expr(
                     let lhs_type = builder.func.dfg.value_type(lhs);
 
                     // Check if lhs is truthy - handle both f64 and i64 types
+                    // Use js_is_truthy for f64 to handle undefined/null/NaN/empty string
                     let lhs_bool = if lhs_type == types::I64 {
+                        // For i64 (pointers), null is 0 and non-null objects are truthy
                         let zero_i64 = builder.ins().iconst(types::I64, 0);
                         builder.ins().icmp(IntCC::NotEqual, lhs, zero_i64)
                     } else {
-                        let zero = builder.ins().f64const(0.0);
-                        builder.ins().fcmp(FloatCC::NotEqual, lhs, zero)
+                        let lhs_f64 = ensure_f64(builder, lhs);
+                        let truthy_func = extern_funcs.get("js_is_truthy")
+                            .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                        let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                        let truthy_call = builder.ins().call(truthy_ref, &[lhs_f64]);
+                        let truthy_result = builder.inst_results(truthy_call)[0];
+                        let zero_i32 = builder.ins().iconst(types::I32, 0);
+                        builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
                     };
 
                     let rhs_block = builder.create_block();
@@ -16677,10 +16981,17 @@ fn compile_expr(
                     builder.seal_block(rhs_block);
                     let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, right, this_ctx)?;
                     // Convert rhs to match lhs_type if needed
+                    // For i64->f64 conversion, we need to NaN-box the pointer to preserve type info
                     let rhs_converted = if lhs_type == types::I64 && builder.func.dfg.value_type(rhs) == types::F64 {
                         builder.ins().bitcast(types::I64, MemFlags::new(), rhs)
                     } else if lhs_type == types::F64 && builder.func.dfg.value_type(rhs) == types::I64 {
-                        builder.ins().bitcast(types::F64, MemFlags::new(), rhs)
+                        // NaN-box the pointer (could be string, object, array, etc.)
+                        // Use js_nanbox_string for strings (most common case from literals)
+                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                        let call = builder.ins().call(nanbox_ref, &[rhs]);
+                        builder.inst_results(call)[0]
                     } else {
                         rhs
                     };
@@ -16935,7 +17246,7 @@ fn compile_expr(
                                 fn is_string_expr_for_multi(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::String(_) => true,
-                                        Expr::EnvGet(_) | Expr::FsReadFileSync(_) => true,
+                                        Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
                                         Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                                         Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::JsonStringify(_) => true,
                                         Expr::CryptoRandomBytes(_) | Expr::CryptoRandomUUID |
@@ -17094,7 +17405,7 @@ fn compile_expr(
                         let is_string_arg = if let Some(arg) = args.first() {
                             match arg {
                                 Expr::String(_) => true,
-                                Expr::EnvGet(_) => true,
+                                Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
                                 Expr::FsReadFileSync(_) => true,
                                 Expr::JsonStringify(_) => true,
                                 Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
@@ -17129,7 +17440,7 @@ fn compile_expr(
                                         match expr {
                                             Expr::String(_) => true,
                                             Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
-                                            Expr::EnvGet(_) | Expr::FsReadFileSync(_) | Expr::JsonStringify(_) |
+                                            Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) | Expr::JsonStringify(_) |
                                             Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                                             Expr::PathExtname(_) | Expr::PathResolve(_) => true,
                                             Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsHomedir |
@@ -17372,7 +17683,7 @@ fn compile_expr(
                         let is_string_arg = if let Some(arg) = args.first() {
                             match arg {
                                 Expr::String(_) => true,
-                                Expr::EnvGet(_) => true,
+                                Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
                                 Expr::FsReadFileSync(_) => true,
                                 Expr::JsonStringify(_) => true,
                                 Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
@@ -17398,7 +17709,7 @@ fn compile_expr(
                                         match expr {
                                             Expr::String(_) => true,
                                             Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
-                                            Expr::EnvGet(_) | Expr::FsReadFileSync(_) | Expr::JsonStringify(_) |
+                                            Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) | Expr::JsonStringify(_) |
                                             Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                                             Expr::PathExtname(_) | Expr::PathResolve(_) => true,
                                             Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsHomedir |
@@ -17550,7 +17861,7 @@ fn compile_expr(
                         let is_string_arg = if let Some(arg) = args.first() {
                             match arg {
                                 Expr::String(_) => true,
-                                Expr::EnvGet(_) => true,
+                                Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
                                 Expr::FsReadFileSync(_) => true,
                                 Expr::JsonStringify(_) => true,
                                 Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
@@ -17576,7 +17887,7 @@ fn compile_expr(
                                         match expr {
                                             Expr::String(_) => true,
                                             Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
-                                            Expr::EnvGet(_) | Expr::FsReadFileSync(_) | Expr::JsonStringify(_) |
+                                            Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) | Expr::JsonStringify(_) |
                                             Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                                             Expr::PathExtname(_) | Expr::PathResolve(_) => true,
                                             Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsHomedir |
@@ -17747,7 +18058,8 @@ fn compile_expr(
                             if let Some(func_id) = extern_funcs.get("js_promise_resolved") {
                                 let func_ref = module.declare_func_in_func(*func_id, builder.func);
                                 let value = if arg_vals.is_empty() {
-                                    builder.ins().f64const(0.0) // undefined
+                                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                    builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)) // undefined
                                 } else {
                                     let arg_val = arg_vals[0];
                                     let arg_type = builder.func.dfg.value_type(arg_val);
@@ -18271,7 +18583,8 @@ fn compile_expr(
                                             .ok_or_else(|| anyhow!("js_map_clear not declared"))?;
                                         let func_ref = module.declare_func_in_func(*clear_func, builder.func);
                                         builder.ins().call(func_ref, &[map_ptr]);
-                                        return Ok(builder.ins().f64const(0.0)); // undefined
+                                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED))); // undefined
                                     }
                                     _ => {}
                                 }
@@ -18321,7 +18634,8 @@ fn compile_expr(
                                             .ok_or_else(|| anyhow!("js_set_clear not declared"))?;
                                         let func_ref = module.declare_func_in_func(*clear_func, builder.func);
                                         builder.ins().call(func_ref, &[set_ptr]);
-                                        return Ok(builder.ins().f64const(0.0)); // undefined
+                                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED))); // undefined
                                     }
                                     _ => {}
                                 }
@@ -18911,32 +19225,35 @@ fn compile_expr(
 
                     // Handle array methods on any expression (e.g., data.content.find(...))
                     // These methods are called on expressions that may be arrays but aren't local variables
+                    // Use dynamic versions that handle both JS handle arrays (from JSON) and native arrays
                     match property.as_str() {
                         "find" => {
                             if arg_vals.len() >= 1 {
                                 let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, object, this_ctx)?;
-                                let arr_ptr = ensure_i64(builder, arr_val);
+                                // Use dynamic version that handles both JS handle and native arrays
+                                let arr_f64 = ensure_f64(builder, arr_val);
                                 let cb_ptr = ensure_i64(builder, arg_vals[0]);
 
-                                let func = extern_funcs.get("js_array_find")
-                                    .ok_or_else(|| anyhow!("js_array_find not declared"))?;
+                                let func = extern_funcs.get("js_dynamic_array_find")
+                                    .ok_or_else(|| anyhow!("js_dynamic_array_find not declared"))?;
                                 let func_ref = module.declare_func_in_func(*func, builder.func);
-                                let call = builder.ins().call(func_ref, &[arr_ptr, cb_ptr]);
+                                let call = builder.ins().call(func_ref, &[arr_f64, cb_ptr]);
                                 return Ok(builder.inst_results(call)[0]);
                             }
                         }
                         "findIndex" => {
                             if arg_vals.len() >= 1 {
                                 let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, object, this_ctx)?;
-                                let arr_ptr = ensure_i64(builder, arr_val);
+                                // Use dynamic version that handles both JS handle and native arrays
+                                let arr_f64 = ensure_f64(builder, arr_val);
                                 let cb_ptr = ensure_i64(builder, arg_vals[0]);
 
-                                let func = extern_funcs.get("js_array_findIndex")
-                                    .ok_or_else(|| anyhow!("js_array_findIndex not declared"))?;
+                                let func = extern_funcs.get("js_dynamic_array_findIndex")
+                                    .ok_or_else(|| anyhow!("js_dynamic_array_findIndex not declared"))?;
                                 let func_ref = module.declare_func_in_func(*func, builder.func);
-                                let call = builder.ins().call(func_ref, &[arr_ptr, cb_ptr]);
-                                let result = builder.inst_results(call)[0];
-                                return Ok(builder.ins().fcvt_from_sint(types::F64, result));
+                                let call = builder.ins().call(func_ref, &[arr_f64, cb_ptr]);
+                                // Result is already f64 from dynamic version
+                                return Ok(builder.inst_results(call)[0]);
                             }
                         }
                         "forEach" => {
@@ -18949,7 +19266,8 @@ fn compile_expr(
                                     .ok_or_else(|| anyhow!("js_array_forEach not declared"))?;
                                 let func_ref = module.declare_func_in_func(*func, builder.func);
                                 builder.ins().call(func_ref, &[arr_ptr, cb_ptr]);
-                                return Ok(builder.ins().f64const(0.0)); // forEach returns undefined
+                                const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED))); // forEach returns undefined
                             }
                         }
                         "map" => {
@@ -19305,8 +19623,13 @@ fn compile_expr(
                     for &arg_val in arg_vals.iter() {
                         let arg_type = builder.func.dfg.value_type(arg_val);
                         let arg_f64 = if arg_type == types::I64 {
-                            // Bitcast i64 to f64 (pointers become NaN-boxed values)
-                            builder.ins().bitcast(types::F64, MemFlags::new(), arg_val)
+                            // Properly NaN-box i64 pointers for cross-module calls
+                            // (simple bitcast doesn't add the NaN-box tag bits)
+                            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                            let call = builder.ins().call(nanbox_ref, &[arg_val]);
+                            builder.inst_results(call)[0]
                         } else {
                             arg_val
                         };
@@ -19315,6 +19638,155 @@ fn compile_expr(
 
                     let call = builder.ins().call(func_ref, &call_args);
                     return Ok(builder.inst_results(call)[0]);
+                }
+                // Handle optional chaining method calls (e.g., str?.substring(0, 10))
+                // The callee is a Conditional { condition: obj == null, then: undefined, else: PropertyGet }
+                Expr::Conditional { condition: _, then_expr: _, else_expr } => {
+                    // Check if the else_expr is a PropertyGet for a string method
+                    if let Expr::PropertyGet { object, property } = else_expr.as_ref() {
+                        match property.as_str() {
+                            "substring" | "slice" | "trim" | "toLowerCase" | "toUpperCase" |
+                            "indexOf" | "includes" | "split" | "replace" | "startsWith" |
+                            "endsWith" | "padStart" | "padEnd" | "repeat" | "charAt" | "charCodeAt" => {
+                                // Compile the object to get the string value
+                                let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, object, this_ctx)?;
+
+                                // Extract string pointer using unified function
+                                let str_ptr = if builder.func.dfg.value_type(str_val) == types::F64 {
+                                    let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                        .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                    let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                    let call = builder.ins().call(get_str_ptr_ref, &[str_val]);
+                                    builder.inst_results(call)[0]
+                                } else {
+                                    str_val
+                                };
+
+                                match property.as_str() {
+                                    "substring" | "slice" => {
+                                        let func_name = if property == "substring" { "js_string_substring" } else { "js_string_slice" };
+                                        let func = extern_funcs.get(func_name)
+                                            .ok_or_else(|| anyhow!("{} not declared", func_name))?;
+                                        let func_ref = module.declare_func_in_func(*func, builder.func);
+
+                                        let start = if !arg_vals.is_empty() {
+                                            let arg_f64 = ensure_f64(builder, arg_vals[0]);
+                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                        } else {
+                                            builder.ins().iconst(types::I32, 0)
+                                        };
+                                        let end = if arg_vals.len() > 1 {
+                                            let arg_f64 = ensure_f64(builder, arg_vals[1]);
+                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                        } else {
+                                            builder.ins().iconst(types::I32, i32::MAX as i64)
+                                        };
+
+                                        let call = builder.ins().call(func_ref, &[str_ptr, start, end]);
+                                        let result_ptr = builder.inst_results(call)[0];
+                                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                        let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                                        return Ok(builder.inst_results(nanbox_call)[0]);
+                                    }
+                                    "trim" => {
+                                        let trim_func = extern_funcs.get("js_string_trim")
+                                            .ok_or_else(|| anyhow!("js_string_trim not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*trim_func, builder.func);
+                                        let call = builder.ins().call(func_ref, &[str_ptr]);
+                                        let result_ptr = builder.inst_results(call)[0];
+                                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                        let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                                        return Ok(builder.inst_results(nanbox_call)[0]);
+                                    }
+                                    "toLowerCase" => {
+                                        let lower_func = extern_funcs.get("js_string_to_lower_case")
+                                            .ok_or_else(|| anyhow!("js_string_to_lower_case not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*lower_func, builder.func);
+                                        let call = builder.ins().call(func_ref, &[str_ptr]);
+                                        let result_ptr = builder.inst_results(call)[0];
+                                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                        let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                                        return Ok(builder.inst_results(nanbox_call)[0]);
+                                    }
+                                    "toUpperCase" => {
+                                        let upper_func = extern_funcs.get("js_string_to_upper_case")
+                                            .ok_or_else(|| anyhow!("js_string_to_upper_case not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*upper_func, builder.func);
+                                        let call = builder.ins().call(func_ref, &[str_ptr]);
+                                        let result_ptr = builder.inst_results(call)[0];
+                                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                        let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                                        return Ok(builder.inst_results(nanbox_call)[0]);
+                                    }
+                                    _ => {
+                                        // Other string methods - fall through to default handling
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Not a string method - fall through
+                            }
+                        }
+                    }
+                    // Fall through to default handling
+                    if extern_funcs.contains_key("js_call_value") {
+                        // Compile the callee expression to get a JS function value
+                        let func_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, callee, this_ctx)?;
+                        // js_call_value expects f64, ensure we have the right type
+                        let func_val_type = builder.func.dfg.value_type(func_val_raw);
+                        let func_val = if func_val_type == types::I64 {
+                            builder.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), func_val_raw)
+                        } else {
+                            func_val_raw
+                        };
+
+                        // Build args array if needed
+                        if !arg_vals.is_empty() {
+                            let args_count = arg_vals.len();
+                            let stack_slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                                (args_count * 8) as u32,
+                                8,
+                            ));
+                            let args_ptr = builder.ins().stack_addr(types::I64, stack_slot, 0);
+
+                            for (i, &arg_val_raw) in arg_vals.iter().enumerate() {
+                                // Ensure argument is f64 for JS interop
+                                let arg_val_type = builder.func.dfg.value_type(arg_val_raw);
+                                let arg_val = if arg_val_type == types::I64 {
+                                    builder.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), arg_val_raw)
+                                } else {
+                                    arg_val_raw
+                                };
+                                let offset = (i * 8) as i32;
+                                builder.ins().store(cranelift_codegen::ir::MemFlags::new(), arg_val, args_ptr, offset);
+                            }
+
+                            let args_count_val = builder.ins().iconst(types::I64, args_count as i64);
+
+                            let call_func = extern_funcs.get("js_call_value").unwrap();
+                            let call_ref = module.declare_func_in_func(*call_func, builder.func);
+                            let call = builder.ins().call(call_ref, &[func_val, args_ptr, args_count_val]);
+                            return Ok(builder.inst_results(call)[0]);
+                        } else {
+                            let null_ptr = builder.ins().iconst(types::I64, 0);
+                            let zero_count = builder.ins().iconst(types::I64, 0);
+
+                            let call_func = extern_funcs.get("js_call_value").unwrap();
+                            let call_ref = module.declare_func_in_func(*call_func, builder.func);
+                            let call = builder.ins().call(call_ref, &[func_val, null_ptr, zero_count]);
+                            return Ok(builder.inst_results(call)[0]);
+                        }
+                    }
+                    Err(anyhow!("Unsupported callee expression: Conditional"))
                 }
                 // Fallback: If js_call_value is available (JS runtime enabled),
                 // try to compile the callee as an expression and call it as a JS function
@@ -19536,7 +20008,7 @@ fn compile_expr(
                             fn is_string_expr_for_spread(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                 match expr {
                                     Expr::String(_) => true,
-                                    Expr::EnvGet(_) | Expr::FsReadFileSync(_) => true,
+                                    Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
                                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                                     Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::JsonStringify(_) => true,
                                     Expr::CryptoRandomBytes(_) | Expr::CryptoRandomUUID |
@@ -19897,7 +20369,7 @@ fn compile_expr(
             fn is_string_conditional_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
-                    Expr::EnvGet(_) => true,
+                    Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                     _ => false,
                 }
@@ -19909,8 +20381,14 @@ fn compile_expr(
 
             let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, condition, this_ctx)?;
             let cond_val = ensure_f64(builder, cond_val_raw);
-            let zero = builder.ins().f64const(0.0);
-            let cond_bool = builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
+            // Use js_is_truthy for proper JavaScript truthiness semantics
+            let truthy_func = extern_funcs.get("js_is_truthy")
+                .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+            let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+            let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
+            let truthy_result = builder.inst_results(truthy_call)[0];
+            let zero_i32 = builder.ins().iconst(types::I32, 0);
+            let cond_bool = builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32);
 
             let then_block = builder.create_block();
             let else_block = builder.create_block();
@@ -21302,7 +21780,7 @@ fn compile_expr(
             fn is_string_element(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
-                    Expr::EnvGet(_) | Expr::FsReadFileSync(_) => true,
+                    Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                     Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::JsonStringify(_) => true,
                     Expr::CryptoRandomBytes(_) | Expr::CryptoRandomUUID |
@@ -21812,7 +22290,7 @@ fn compile_expr(
                 match expr {
                     Expr::String(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
-                    Expr::EnvGet(_) => true,
+                    Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                     Expr::PathExtname(_) | Expr::PathResolve(_) => true,
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
@@ -21854,7 +22332,7 @@ fn compile_expr(
                     match expr {
                         Expr::String(_) => true,
                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
-                        Expr::EnvGet(_) => true,
+                        Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
                         // Method calls like str.substring(), str.trim(), etc.
                         Expr::Call { callee, .. } => {
                             if let Expr::PropertyGet { property, .. } = callee.as_ref() {
@@ -22110,7 +22588,7 @@ fn compile_expr(
                 match expr {
                     Expr::String(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
-                    Expr::EnvGet(_) => true,
+                    Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                     Expr::PathExtname(_) | Expr::PathResolve(_) => true,
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
@@ -23641,13 +24119,19 @@ fn compile_expr(
                 Err(anyhow!("No wrapper found for function {} used as value", func_id))
             }
         }
-        Expr::Null | Expr::Undefined => {
-            // Null and undefined are represented as f64 0.0
-            Ok(builder.ins().f64const(0.0))
+        Expr::Null => {
+            // Null is represented as NaN-boxed TAG_NULL (0x7FFC_0000_0000_0002)
+            const TAG_NULL: u64 = 0x7FFC_0000_0000_0002;
+            Ok(builder.ins().f64const(f64::from_bits(TAG_NULL)))
+        }
+        Expr::Undefined => {
+            // Undefined is represented as NaN-boxed TAG_UNDEFINED (0x7FFC_0000_0000_0001)
+            const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+            Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
         }
         Expr::ObjectKeys(obj_expr) => {
             // Object.keys(obj) - returns an array of string keys
-            // Call js_object_keys runtime function
+            // Call js_dynamic_object_keys runtime function (handles Error objects too)
             let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, obj_expr, this_ctx)?;
             // Extract pointer from NaN-boxed value if needed
             let obj_ptr = if builder.func.dfg.value_type(obj_val) == types::I64 {
@@ -23660,8 +24144,8 @@ fn compile_expr(
                 builder.inst_results(call)[0]
             };
 
-            let func = extern_funcs.get("js_object_keys")
-                .ok_or_else(|| anyhow!("js_object_keys not declared"))?;
+            let func = extern_funcs.get("js_dynamic_object_keys")
+                .ok_or_else(|| anyhow!("js_dynamic_object_keys not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
             let call = builder.ins().call(func_ref, &[obj_ptr]);
             let result_ptr = builder.inst_results(call)[0];
@@ -24205,7 +24689,7 @@ fn compile_expr(
                     match expr {
                         Expr::String(_) => true,
                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
-                        Expr::EnvGet(_) | Expr::FsReadFileSync(_) => true,
+                        Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
                         Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                         Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::JsonStringify(_) => true,
                         _ => false,
