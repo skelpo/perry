@@ -8,6 +8,24 @@ Perry is a native TypeScript compiler written in Rust that compiles TypeScript s
 
 **Current Version:** 0.2.40
 
+## Workflow Requirements
+
+**IMPORTANT:** Follow these practices for every code change:
+
+1. **Update CLAUDE.md**: After making any code changes, update this file to document:
+   - New features or fixes in the "Recent Fixes" section
+   - Any new patterns, APIs, or important implementation details
+   - Changes to build commands or architecture
+
+2. **Increment Version**: Bump the version number with every change:
+   - Use patch increments (e.g., 0.2.40 → 0.2.41) for bug fixes and small changes
+   - Use minor increments (e.g., 0.2.x → 0.3.0) for new features
+   - Update the "Current Version" field at the top of this file
+
+3. **Commit Changes**: Always commit after completing a change:
+   - Include both the code changes and CLAUDE.md updates in the same commit
+   - Use descriptive commit messages that summarize the change
+
 ## Build Commands
 
 ```bash
