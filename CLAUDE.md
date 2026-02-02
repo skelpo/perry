@@ -202,7 +202,9 @@ To test a feature, compile and run:
 cargo run --release -- test_factorial.ts && ./test_factorial
 ```
 
-## Recent Fixes (v0.2.37-0.2.44)
+## Recent Fixes (v0.2.37-0.2.49)
+
+**Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
 
 ### v0.2.48
 - Fix string.split() returning corrupted array elements
