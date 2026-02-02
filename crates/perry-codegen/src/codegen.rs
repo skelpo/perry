@@ -15293,32 +15293,108 @@ fn compile_expr(
             Ok(builder.ins().fcvt_from_uint(types::F64, length))
         }
         Expr::ArrayIndexOf { array, value } => {
-            let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, array, this_ctx)?;
-            let arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arr_val);
-            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, value, this_ctx)?;
+            // Check if "array" is actually a string (string.indexOf vs array.indexOf)
+            let is_string_indexof = match array.as_ref() {
+                Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                Expr::String(_) => true,
+                _ => false,
+            };
 
-            let func = extern_funcs.get("js_array_indexOf_f64")
-                .ok_or_else(|| anyhow!("js_array_indexOf_f64 not declared"))?;
-            let func_ref = module.declare_func_in_func(*func, builder.func);
-            let call = builder.ins().call(func_ref, &[arr_ptr, val]);
-            let index = builder.inst_results(call)[0];
+            if is_string_indexof {
+                // String indexOf
+                let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, array, this_ctx)?;
 
-            // Convert i32 to f64
-            Ok(builder.ins().fcvt_from_sint(types::F64, index))
+                // Extract string pointer from NaN-boxed value
+                let str_f64 = ensure_f64(builder, str_val);
+                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                let str_call = builder.ins().call(get_str_ptr_ref, &[str_f64]);
+                let str_ptr = builder.inst_results(str_call)[0];
+
+                // Compile needle value and extract string pointer
+                let needle_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, value, this_ctx)?;
+                let needle_f64 = ensure_f64(builder, needle_val);
+                let needle_call = builder.ins().call(get_str_ptr_ref, &[needle_f64]);
+                let needle_ptr = builder.inst_results(needle_call)[0];
+
+                let index_of_func = extern_funcs.get("js_string_index_of")
+                    .ok_or_else(|| anyhow!("js_string_index_of not declared"))?;
+                let func_ref = module.declare_func_in_func(*index_of_func, builder.func);
+                let call = builder.ins().call(func_ref, &[str_ptr, needle_ptr]);
+                let index = builder.inst_results(call)[0];
+
+                // Convert i32 to f64
+                Ok(builder.ins().fcvt_from_sint(types::F64, index))
+            } else {
+                // Array indexOf
+                let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, array, this_ctx)?;
+                let arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arr_val);
+                let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, value, this_ctx)?;
+
+                let func = extern_funcs.get("js_array_indexOf_f64")
+                    .ok_or_else(|| anyhow!("js_array_indexOf_f64 not declared"))?;
+                let func_ref = module.declare_func_in_func(*func, builder.func);
+                let call = builder.ins().call(func_ref, &[arr_ptr, val]);
+                let index = builder.inst_results(call)[0];
+
+                // Convert i32 to f64
+                Ok(builder.ins().fcvt_from_sint(types::F64, index))
+            }
         }
         Expr::ArrayIncludes { array, value } => {
-            let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, array, this_ctx)?;
-            let arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arr_val);
-            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, value, this_ctx)?;
+            // Check if "array" is actually a string (string.includes vs array.includes)
+            let is_string_includes = match array.as_ref() {
+                Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                Expr::String(_) => true,
+                _ => false,
+            };
 
-            let func = extern_funcs.get("js_array_includes_f64")
-                .ok_or_else(|| anyhow!("js_array_includes_f64 not declared"))?;
-            let func_ref = module.declare_func_in_func(*func, builder.func);
-            let call = builder.ins().call(func_ref, &[arr_ptr, val]);
-            let result = builder.inst_results(call)[0];
+            if is_string_includes {
+                // String includes (use indexOf and check if >= 0)
+                let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, array, this_ctx)?;
 
-            // Convert i32 (0 or 1) to f64
-            Ok(builder.ins().fcvt_from_sint(types::F64, result))
+                // Extract string pointer from NaN-boxed value
+                let str_f64 = ensure_f64(builder, str_val);
+                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                let str_call = builder.ins().call(get_str_ptr_ref, &[str_f64]);
+                let str_ptr = builder.inst_results(str_call)[0];
+
+                // Compile needle value and extract string pointer
+                let needle_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, value, this_ctx)?;
+                let needle_f64 = ensure_f64(builder, needle_val);
+                let needle_call = builder.ins().call(get_str_ptr_ref, &[needle_f64]);
+                let needle_ptr = builder.inst_results(needle_call)[0];
+
+                let index_of_func = extern_funcs.get("js_string_index_of")
+                    .ok_or_else(|| anyhow!("js_string_index_of not declared"))?;
+                let func_ref = module.declare_func_in_func(*index_of_func, builder.func);
+                let call = builder.ins().call(func_ref, &[str_ptr, needle_ptr]);
+                let index_i32 = builder.inst_results(call)[0];
+
+                // includes returns true if index >= 0
+                let zero = builder.ins().iconst(types::I32, 0);
+                let is_found = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, index_i32, zero);
+                // Convert i8 bool to f64 (1.0 or 0.0)
+                let extended = builder.ins().uextend(types::I32, is_found);
+                Ok(builder.ins().fcvt_from_sint(types::F64, extended))
+            } else {
+                // Array includes
+                let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, array, this_ctx)?;
+                let arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arr_val);
+                let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, value, this_ctx)?;
+
+                let func = extern_funcs.get("js_array_includes_f64")
+                    .ok_or_else(|| anyhow!("js_array_includes_f64 not declared"))?;
+                let func_ref = module.declare_func_in_func(*func, builder.func);
+                let call = builder.ins().call(func_ref, &[arr_ptr, val]);
+                let result = builder.inst_results(call)[0];
+
+                // Convert i32 (0 or 1) to f64
+                Ok(builder.ins().fcvt_from_sint(types::F64, result))
+            }
         }
         Expr::ArraySlice { array, start, end } => {
             let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, array, this_ctx)?;
@@ -18377,7 +18453,13 @@ fn compile_expr(
                                         };
                                         // For default pad string " ", use js_string_alloc_space
                                         let pad_str = if arg_vals.len() >= 2 {
-                                            builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1])
+                                            // Extract string pointer from NaN-boxed value
+                                            let pad_f64 = ensure_f64(builder, arg_vals[1]);
+                                            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                            let pad_call = builder.ins().call(get_str_ptr_ref, &[pad_f64]);
+                                            builder.inst_results(pad_call)[0]
                                         } else {
                                             let alloc_space_func = extern_funcs.get("js_string_alloc_space")
                                                 .ok_or_else(|| anyhow!("js_string_alloc_space not declared"))?;
@@ -18409,7 +18491,13 @@ fn compile_expr(
                                         };
                                         // For default pad string " ", use js_string_alloc_space
                                         let pad_str = if arg_vals.len() >= 2 {
-                                            builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1])
+                                            // Extract string pointer from NaN-boxed value
+                                            let pad_f64 = ensure_f64(builder, arg_vals[1]);
+                                            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                            let pad_call = builder.ins().call(get_str_ptr_ref, &[pad_f64]);
+                                            builder.inst_results(pad_call)[0]
                                         } else {
                                             let alloc_space_func = extern_funcs.get("js_string_alloc_space")
                                                 .ok_or_else(|| anyhow!("js_string_alloc_space not declared"))?;
@@ -18429,7 +18517,13 @@ fn compile_expr(
                                     }
                                     "indexOf" => {
                                         // str.indexOf(needle) or str.indexOf(needle, fromIndex)
-                                        let needle_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                        // Extract needle string pointer from NaN-boxed value
+                                        let needle_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let needle_call = builder.ins().call(get_str_ptr_ref, &[needle_f64]);
+                                        let needle_ptr = builder.inst_results(needle_call)[0];
 
                                         let result_i32 = if arg_vals.len() >= 2 {
                                             // str.indexOf(needle, fromIndex)
@@ -18459,20 +18553,39 @@ fn compile_expr(
                                             .ok_or_else(|| anyhow!("js_string_split not declared"))?;
                                         let func_ref = module.declare_func_in_func(*split_func, builder.func);
 
-                                        // The delimiter argument should be a string pointer
-                                        let delim_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                        // Extract delimiter string pointer from NaN-boxed value
+                                        let delim_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let delim_call = builder.ins().call(get_str_ptr_ref, &[delim_f64]);
+                                        let delim_ptr = builder.inst_results(delim_call)[0];
 
                                         let call = builder.ins().call(func_ref, &[str_ptr, delim_ptr]);
                                         let result_ptr = builder.inst_results(call)[0];
-                                        // Return array pointer as f64 (bitcast)
-                                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
+                                        // NaN-box the array pointer
+                                        let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                            .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                        let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                                        return Ok(builder.inst_results(nanbox_call)[0]);
                                     }
                                     "replace" => {
                                         // str.replace(pattern, replacement)
                                         // For now, assume pattern is a regex (first arg) and replacement is a string (second arg)
                                         if arg_vals.len() >= 2 {
-                                            let pattern_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
-                                            let replacement_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1]);
+                                            // Extract string pointers from NaN-boxed values
+                                            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+
+                                            let pattern_f64 = ensure_f64(builder, arg_vals[0]);
+                                            let pattern_call = builder.ins().call(get_str_ptr_ref, &[pattern_f64]);
+                                            let pattern_ptr = builder.inst_results(pattern_call)[0];
+
+                                            let replacement_f64 = ensure_f64(builder, arg_vals[1]);
+                                            let replacement_call = builder.ins().call(get_str_ptr_ref, &[replacement_f64]);
+                                            let replacement_ptr = builder.inst_results(replacement_call)[0];
 
                                             let replace_func = extern_funcs.get("js_string_replace_regex")
                                                 .ok_or_else(|| anyhow!("js_string_replace_regex not declared"))?;
@@ -18480,7 +18593,12 @@ fn compile_expr(
 
                                             let call = builder.ins().call(func_ref, &[str_ptr, pattern_ptr, replacement_ptr]);
                                             let result_ptr = builder.inst_results(call)[0];
-                                            return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
+                                            // NaN-box the result string
+                                            let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                                .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                            let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                                            return Ok(builder.inst_results(nanbox_call)[0]);
                                         }
                                     }
                                     "repeat" => {
@@ -19178,7 +19296,14 @@ fn compile_expr(
                                 }
                                 "indexOf" => {
                                     if !arg_vals.is_empty() {
-                                        let needle_ptr = ensure_i64(builder, arg_vals[0]);
+                                        // Extract needle string pointer from NaN-boxed value
+                                        let needle_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let needle_call = builder.ins().call(get_str_ptr_ref, &[needle_f64]);
+                                        let needle_ptr = builder.inst_results(needle_call)[0];
+
                                         let result_i32 = if arg_vals.len() >= 2 {
                                             let index_of_func = extern_funcs.get("js_string_index_of_from")
                                                 .ok_or_else(|| anyhow!("js_string_index_of_from not declared"))?;
@@ -19200,8 +19325,14 @@ fn compile_expr(
                                 }
                                 "includes" => {
                                     if !arg_vals.is_empty() {
-                                        // Use index_of and check if >= 0
-                                        let needle_ptr = ensure_i64(builder, arg_vals[0]);
+                                        // Extract needle string pointer from NaN-boxed value
+                                        let needle_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let needle_call = builder.ins().call(get_str_ptr_ref, &[needle_f64]);
+                                        let needle_ptr = builder.inst_results(needle_call)[0];
+
                                         let index_of_func = extern_funcs.get("js_string_index_of")
                                             .ok_or_else(|| anyhow!("js_string_index_of not declared"))?;
                                         let func_ref = module.declare_func_in_func(*index_of_func, builder.func);
@@ -19218,18 +19349,37 @@ fn compile_expr(
                                 }
                                 "split" => {
                                     if !arg_vals.is_empty() {
-                                        let delim_ptr = ensure_i64(builder, arg_vals[0]);
+                                        // Extract delimiter string pointer from NaN-boxed value
+                                        let delim_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let delim_call = builder.ins().call(get_str_ptr_ref, &[delim_f64]);
+                                        let delim_ptr = builder.inst_results(delim_call)[0];
+
                                         let split_func = extern_funcs.get("js_string_split")
                                             .ok_or_else(|| anyhow!("js_string_split not declared"))?;
                                         let func_ref = module.declare_func_in_func(*split_func, builder.func);
                                         let call = builder.ins().call(func_ref, &[str_ptr, delim_ptr]);
                                         let result_ptr = builder.inst_results(call)[0];
-                                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
+                                        // NaN-box the array pointer
+                                        let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                            .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                        let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                                        return Ok(builder.inst_results(nanbox_call)[0]);
                                     }
                                 }
                                 "startsWith" => {
                                     if !arg_vals.is_empty() {
-                                        let prefix_ptr = ensure_i64(builder, arg_vals[0]);
+                                        // Extract prefix string pointer from NaN-boxed value
+                                        let prefix_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let prefix_call = builder.ins().call(get_str_ptr_ref, &[prefix_f64]);
+                                        let prefix_ptr = builder.inst_results(prefix_call)[0];
+
                                         let func = extern_funcs.get("js_string_starts_with")
                                             .ok_or_else(|| anyhow!("js_string_starts_with not declared"))?;
                                         let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -19241,7 +19391,14 @@ fn compile_expr(
                                 }
                                 "endsWith" => {
                                     if !arg_vals.is_empty() {
-                                        let suffix_ptr = ensure_i64(builder, arg_vals[0]);
+                                        // Extract suffix string pointer from NaN-boxed value
+                                        let suffix_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let suffix_call = builder.ins().call(get_str_ptr_ref, &[suffix_f64]);
+                                        let suffix_ptr = builder.inst_results(suffix_call)[0];
+
                                         let func = extern_funcs.get("js_string_ends_with")
                                             .ok_or_else(|| anyhow!("js_string_ends_with not declared"))?;
                                         let func_ref = module.declare_func_in_func(*func, builder.func);
