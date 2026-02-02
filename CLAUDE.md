@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.40
+**Current Version:** 0.2.42
 
 ## Workflow Requirements
 
@@ -202,7 +202,21 @@ To test a feature, compile and run:
 cargo run --release -- test_factorial.ts && ./test_factorial
 ```
 
-## Recent Fixes (v0.2.37-0.2.40)
+## Recent Fixes (v0.2.37-0.2.42)
+
+### v0.2.42
+- Fix native module method calls (pool.execute, redis.get, etc.) crashing with SIGSEGV
+- Extract raw pointers from NaN-boxed objects using `js_nanbox_get_pointer` for:
+  mysql2, ioredis, ws, events, lru-cache, commander, decimal.js, big.js,
+  bignumber.js, pg, mongodb, better-sqlite3, sharp, cheerio, nodemailer,
+  dayjs, moment, node-cron, rate-limiter-flexible
+- Extract NaN-boxed string arguments properly for SQL queries, Redis keys,
+  WebSocket messages, and EventEmitter event names
+- Extract NaN-boxed array pointers for execute params
+
+### v0.2.41
+- Fix mysql.createPool() returning number instead of object
+- NaN-box native module return values with POINTER_TAG
 
 ### v0.2.40
 - Fix Promise.catch() crash - closures invoked properly with js_closure_call1
