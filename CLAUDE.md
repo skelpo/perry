@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
+**Current Version:** 0.2.40
+
 ## Build Commands
 
 ```bash
@@ -80,8 +82,10 @@ TypeScript (.ts) → Parse (SWC) → AST → Lower → HIR → Transform → Cod
 - **perry-runtime** - Runtime library linked into executables
   - `value.rs` - JSValue representation (NaN-boxing)
   - `object.rs`, `array.rs`, `string.rs`, `bigint.rs`, `closure.rs` - Heap types
+  - `promise.rs` - Promise implementation with closure-based callbacks
   - `builtins.rs` - Built-in functions (console.log, etc.)
-- **perry-stdlib** - Standard library (placeholder for Node.js API support)
+- **perry-stdlib** - Standard library (Node.js API support: mysql2, redis, fetch, etc.)
+- **perry-jsruntime** - JavaScript interop via QuickJS
 
 ### Key Data Flow
 
@@ -99,6 +103,70 @@ The HIR (`crates/perry-hir/src/ir.rs`) represents a simplified, typed intermedia
 - **Statement**: Let, Expr, Return, If, While, For, Break, Continue, Throw, Try
 - **Expression**: Literals, variable access (LocalGet/Set, GlobalGet/Set), operations, calls, object/array literals
 
+## NaN-Boxing Implementation
+
+Perry uses NaN-boxing to represent JavaScript values efficiently in 64 bits. Key tag constants in `perry-runtime/src/value.rs`:
+
+```rust
+TAG_UNDEFINED = 0x7FFC_0000_0000_0001  // undefined value
+TAG_NULL      = 0x7FFC_0000_0000_0002  // null value
+TAG_FALSE     = 0x7FFC_0000_0000_0003  // false
+TAG_TRUE      = 0x7FFC_0000_0000_0004  // true
+STRING_TAG    = 0x7FFF_0000_0000_0000  // String pointer (lower 48 bits)
+POINTER_TAG   = 0x7FFD_0000_0000_0000  // Object/Array pointer (lower 48 bits)
+INT32_TAG     = 0x7FFE_0000_0000_0000  // Int32 value (lower 32 bits)
+```
+
+### Important Runtime Functions
+
+- `js_nanbox_string(ptr)` - Wrap a string pointer with STRING_TAG
+- `js_nanbox_pointer(ptr)` - Wrap an object/array pointer with POINTER_TAG
+- `js_get_string_pointer_unified(f64)` - Extract raw pointer from NaN-boxed or raw string
+- `js_jsvalue_to_string(f64)` - Convert any NaN-boxed value to string
+- `js_is_truthy(f64)` - Proper JavaScript truthiness semantics
+
+### Module-Level Variables
+
+Module-level variables are stored in global data slots:
+- **Strings**: Stored as F64 (NaN-boxed), NOT I64 raw pointers
+- **Arrays/Objects**: Stored as I64 (raw pointers)
+- Functions access module variables via `module_var_data_ids` mapping
+
+## Promise System
+
+Promises use closure-based callbacks (`ClosurePtr`) instead of raw function pointers:
+
+```rust
+pub type ClosurePtr = *const crate::closure::ClosureHeader;
+
+pub struct Promise {
+    state: PromiseState,
+    value: f64,
+    reason: f64,
+    on_fulfilled: ClosurePtr,  // Closure, not raw fn pointer
+    on_rejected: ClosurePtr,
+    next: *mut Promise,
+}
+```
+
+Callbacks are invoked via `js_closure_call1(closure, value)` which properly passes the closure environment.
+
+## Known Working Features
+
+- Basic arithmetic, comparisons, logical operators
+- Variables, constants, type annotations
+- Functions (regular, async, arrow, closures)
+- Classes with constructors, methods, inheritance
+- Arrays with methods (push, pop, map, filter, find, etc.)
+- Objects with property access (dot and bracket notation)
+- Template literals with interpolation
+- Promises with .then(), .catch(), .finally()
+- Promise.resolve(), Promise.reject()
+- async/await
+- try/catch/finally
+- fetch() with custom headers
+- Multi-module compilation with imports/exports
+
 ## Test Files
 
 Root-level `test_*.ts` files serve as integration tests for various language features:
@@ -115,3 +183,47 @@ To test a feature, compile and run:
 ```bash
 cargo run --release -- test_factorial.ts && ./test_factorial
 ```
+
+## Recent Fixes (v0.2.37-0.2.40)
+
+### v0.2.40
+- Fix Promise.catch() crash - closures invoked properly with js_closure_call1
+- Add Promise.reject() static method
+- Fix bracket notation `obj['key']` SIGSEGV
+- Fix module-level const in template literals SIGSEGV
+- Improve string concatenation fallback handling
+
+### v0.2.39
+- Promise callback system rewritten to use ClosurePtr
+
+### v0.2.38
+- Fix bracket notation property access for NaN-boxed string keys
+
+### v0.2.37
+- Fix undefined truthiness (undefined now properly falsy)
+- NaN-box string literals with STRING_TAG
+- Fix fetch() with NaN-boxed URL strings
+- Add js_is_truthy() runtime function
+- Fix uninitialized variables (now TAG_UNDEFINED, not 0.0)
+- Special handling for undefined/null/NaN/Infinity identifiers
+
+## Debugging Tips
+
+1. **Print HIR**: Use `--print-hir` to see the intermediate representation
+2. **Keep object files**: Use `--keep-intermediates` to inspect .o files
+3. **Check value types**: NaN-boxed values can be inspected by their bit patterns
+4. **Module init order**: Entry module calls `_perry_init_*` for each imported module
+
+## Common Issues
+
+### SIGSEGV in string operations
+- Check if string pointers are being extracted from NaN-boxed values
+- Use `js_get_string_pointer_unified()` for strings that might be NaN-boxed
+
+### Promise callbacks not firing
+- Ensure callbacks are closures, not raw function pointers
+- Check that `js_promise_run_microtasks()` is being called in the event loop
+
+### Cross-module variable access
+- Module-level strings are F64 (NaN-boxed), not I64 pointers
+- Check `module_level_locals` for proper type info
