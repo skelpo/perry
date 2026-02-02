@@ -72,6 +72,8 @@ struct LocalInfo {
     is_set: bool,
     /// Is this a Buffer?
     is_buffer: bool,
+    /// Is this an EventEmitter?
+    is_event_emitter: bool,
     /// Is this a union type? (uses dynamic typing at runtime)
     is_union: bool,
     /// Is this a mixed-type array? (element type is union or any)
@@ -462,8 +464,8 @@ impl Compiler {
         match ty {
             // Numbers use f64
             Type::Number | Type::Int32 => types::F64,
-            // BigInt is a heap-allocated pointer (i64)
-            Type::BigInt => types::I64,
+            // BigInt uses f64 (NaN-boxed pointer with BIGINT_TAG)
+            Type::BigInt => types::F64,
             // Booleans can be f64 (0.0 or 1.0) for simplicity
             Type::Boolean => types::F64,
             // Strings, arrays, objects are pointers (i64)
@@ -482,8 +484,8 @@ impl Compiler {
             Type::Generic { .. } => types::I64,
             // Void/Null/Undefined return f64 (will be 0)
             Type::Void | Type::Null => types::F64,
-            // Any/Unknown use i64 (tagged values or pointers)
-            Type::Any | Type::Unknown => types::I64,
+            // Any/Unknown use f64 (NaN-boxed values for JS interop)
+            Type::Any | Type::Unknown => types::F64,
             // Functions are pointers
             Type::Function(_) => types::I64,
             // Tuples use i64 (could be more complex)
@@ -532,17 +534,24 @@ impl Compiler {
 
                 // Also check the init expression type for better inference
                 // Note: Expr::String is NOT included because strings are now NaN-boxed (f64 values)
+                // Note: Native handle classes (EventEmitter, Decimal, etc.) use f64 (NaN-boxed), not i64 pointers
                 let is_pointer_from_init = if let Some(init_expr) = init {
-                    matches!(init_expr,
-                        Expr::Array(_) | Expr::Object(_) |
-                        Expr::New { .. } | Expr::ArraySpread(_) |
+                    match init_expr {
+                        Expr::New { class_name, .. } => {
+                            // Native handle classes use f64, not i64
+                            !matches!(class_name.as_str(),
+                                "EventEmitter" | "Decimal" | "Big" | "BigNumber" | "LRUCache" | "Command")
+                        }
+                        Expr::Array(_) | Expr::Object(_) | Expr::ArraySpread(_) |
                         Expr::Closure { .. } | Expr::MapNew | Expr::SetNew |
                         // JS interop expressions return pointers
                         Expr::JsCallFunction { .. } | Expr::JsCallMethod { .. } |
                         Expr::JsGetExport { .. } | Expr::JsNew { .. } |
                         Expr::JsNewFromHandle { .. } | Expr::JsGetProperty { .. } |
                         // Call expressions might return objects/arrays
-                        Expr::Call { .. } | Expr::NativeMethodCall { .. })
+                        Expr::Call { .. } | Expr::NativeMethodCall { .. } => true,
+                        _ => false,
+                    }
                 } else {
                     false
                 };
@@ -596,6 +605,7 @@ impl Compiler {
                     is_map: matches!(init, Some(Expr::MapNew)),
                     is_set: matches!(init, Some(Expr::SetNew)),
                     is_buffer,
+                    is_event_emitter: matches!(init, Some(Expr::New { class_name, .. }) if class_name == "EventEmitter"),
                     is_union: false,
                     is_mixed_array: false,
                     is_integer: false,
@@ -1175,7 +1185,7 @@ impl Compiler {
                     is_bigint: false,
                     is_closure,
                     is_boxed: false,
-                    is_map: false, is_set: false, is_buffer: false, is_union: false,
+                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
                     is_mixed_array: false,
                     is_integer: false,
                     is_integer_array: false,
@@ -1209,7 +1219,7 @@ impl Compiler {
                         is_bigint: false,
                         is_closure: false,
                         is_boxed: false,
-                        is_map: false, is_set: false, is_buffer: false, is_union: false,
+                        is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
                         is_mixed_array: false,
                         is_integer: false,
                         is_integer_array: false,
@@ -1459,7 +1469,7 @@ impl Compiler {
                         type_args: Vec::new(),
                         is_pointer: false, is_array: false, is_string: false, is_bigint: false,
                         is_closure: false, is_boxed: false, is_map: false, is_set: false,
-                        is_buffer: false, is_union: false, is_mixed_array: false, is_integer: false,
+                        is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
                         squared_cache: None, product_cache: None,
@@ -1593,7 +1603,7 @@ impl Compiler {
                     is_bigint: false,
                     is_closure,
                     is_boxed: false,
-                    is_map: false, is_set: false, is_buffer: false, is_union: false,
+                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
                     is_mixed_array: false,
                     is_integer: false,
                     is_integer_array: false,
@@ -1620,7 +1630,7 @@ impl Compiler {
                         type_args: Vec::new(),
                         is_pointer: false, is_array: false, is_string: false, is_bigint: false,
                         is_closure: false, is_boxed: false, is_map: false, is_set: false,
-                        is_buffer: false, is_union: false, is_mixed_array: false, is_integer: false,
+                        is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
                         squared_cache: None, product_cache: None,
@@ -1778,7 +1788,7 @@ impl Compiler {
                     is_bigint: false,
                     is_closure,
                     is_boxed: false,
-                    is_map: false, is_set: false, is_buffer: false, is_union: false,
+                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
                     is_mixed_array: false,
                     is_integer: false,
                     is_integer_array: false,
@@ -1805,7 +1815,7 @@ impl Compiler {
                         type_args: Vec::new(),
                         is_pointer: false, is_array: false, is_string: false, is_bigint: false,
                         is_closure: false, is_boxed: false, is_map: false, is_set: false,
-                        is_buffer: false, is_union: false, is_mixed_array: false, is_integer: false,
+                        is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
                         squared_cache: None, product_cache: None,
@@ -1982,7 +1992,7 @@ impl Compiler {
                     is_bigint: false,
                     is_closure,
                     is_boxed: false,
-                    is_map: false, is_set: false, is_buffer: false, is_union: false,
+                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
                     is_mixed_array: false,
                     is_integer: false,
                     is_integer_array: false,
@@ -2009,7 +2019,7 @@ impl Compiler {
                         type_args: Vec::new(),
                         is_pointer: false, is_array: false, is_string: false, is_bigint: false,
                         is_closure: false, is_boxed: false, is_map: false, is_set: false,
-                        is_buffer: false, is_union: false, is_mixed_array: false, is_integer: false,
+                        is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
                         squared_cache: None, product_cache: None,
@@ -2262,6 +2272,19 @@ impl Compiler {
             self.extern_funcs.insert("js_nanbox_string".to_string(), func_id);
         }
 
+        // Declare js_nanbox_bigint(i64) -> f64 (for BigInt values)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // raw BigInt pointer
+            sig.returns.push(AbiParam::new(types::F64)); // NaN-boxed BigInt (uses BIGINT_TAG)
+            let func_id = self.module.declare_function(
+                "js_nanbox_bigint",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_nanbox_bigint".to_string(), func_id);
+        }
+
         // Declare js_nanbox_get_string_pointer(f64) -> i64 (extract string pointer from NaN-boxed value)
         {
             let mut sig = self.module.make_signature();
@@ -2300,6 +2323,19 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_nanbox_get_pointer".to_string(), func_id);
+        }
+
+        // Declare js_nanbox_get_bigint(f64) -> i64 (extract BigInt pointer from NaN-boxed value)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed BigInt value
+            sig.returns.push(AbiParam::new(types::I64)); // raw BigInt pointer
+            let func_id = self.module.declare_function(
+                "js_nanbox_get_bigint",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_nanbox_get_bigint".to_string(), func_id);
         }
 
         // Declare js_is_truthy(f64) -> i32 (check if value is truthy in JavaScript terms)
@@ -8251,6 +8287,7 @@ impl Compiler {
                 let is_string = matches!(param.ty, perry_types::Type::String);
                 let is_array = matches!(&param.ty, perry_types::Type::Array(_));
                 let is_closure = matches!(param.ty, perry_types::Type::Function(_));
+                let is_bigint = matches!(param.ty, perry_types::Type::BigInt);
                 let is_pointer = abi_type == types::I64;
                 // Named types (interfaces) and Object types may contain NaN-boxed values
                 // when accessed via PropertyGet, so treat them as potentially union
@@ -8273,10 +8310,10 @@ impl Compiler {
                     is_pointer,
                     is_array,
                     is_string,
-                    is_bigint: false,
+                    is_bigint,
                     is_closure,
                     is_boxed: false,
-                    is_map: false, is_set: false, is_buffer: false, is_union,
+                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union,
                     is_mixed_array,
                     is_integer: false,
                     is_integer_array: false,
@@ -8312,7 +8349,7 @@ impl Compiler {
                         is_bigint: false,
                         is_closure: false,
                         is_boxed: false,
-                        is_map: false, is_set: false, is_buffer: false, is_union: false,
+                        is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
                         is_mixed_array: false,
                         is_integer: false,
                         is_integer_array: false,
@@ -9563,7 +9600,7 @@ impl Compiler {
                     is_bigint: false,
                     is_closure,
                     is_boxed: false,
-                    is_map: false, is_set: false, is_buffer: false, is_union: is_union_type,
+                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: is_union_type,
                     is_mixed_array: false,
                     is_integer: false,
                     is_integer_array: false,
@@ -9637,7 +9674,7 @@ impl Compiler {
                         is_bigint: false,
                         is_closure: false,
                         is_boxed: true,
-                        is_map: false, is_set: false, is_buffer: false, is_union: false,
+                        is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
                         is_mixed_array: false,
                         is_integer: false,
                         is_integer_array: false,
@@ -9666,7 +9703,7 @@ impl Compiler {
                         is_bigint: false,
                         is_closure: false,
                         is_boxed: false,
-                        is_map: false, is_set: false, is_buffer: false, is_union: false,
+                        is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
                         is_mixed_array: false,
                         is_integer: false,
                         is_integer_array: false,
@@ -9706,7 +9743,7 @@ impl Compiler {
                         is_bigint: false,
                         is_closure: false,
                         is_boxed: false,
-                        is_map: false, is_set: false, is_buffer: false, is_union: false,
+                        is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
                         is_mixed_array: false,
                         is_integer: false,
                         is_integer_array: false,
@@ -10607,12 +10644,12 @@ fn compile_stmt(
 
             // Use declared type information first, fall back to expression inference
             // For union types, we should NOT infer is_string etc. based on initialization
-            let (class_name, is_pointer, is_array, is_string, is_bigint, is_closure, is_map, is_set, is_buffer) = if is_typed_union {
+            let (class_name, is_pointer, is_array, is_string, is_bigint, is_closure, is_map, is_set, is_buffer, is_event_emitter) = if is_typed_union {
                 // Union types use f64 (NaN-boxed), but track class_name if available for property access
-                (typed_class_name.clone(), false, false, false, false, false, false, false, false)
+                (typed_class_name.clone(), false, false, false, false, false, false, false, false, false)
             } else if is_typed_string {
                 // String type uses f64 (NaN-boxed) but is_string = true for console.log
-                (None, false, false, true, false, false, false, false, false)
+                (None, false, false, true, false, false, false, false, false, false)
             } else if is_typed_pointer {
                 // Type annotation tells us the type (non-string pointer types use i64)
                 let class_name = typed_class_name.or_else(|| {
@@ -10622,36 +10659,37 @@ fn compile_stmt(
                         None
                     }
                 });
-                (class_name, true, is_typed_array, false, is_typed_bigint, is_typed_closure, is_typed_map, is_typed_set, false)
+                (class_name, true, is_typed_array, false, is_typed_bigint, is_typed_closure, is_typed_map, is_typed_set, false, false)
             } else {
                 // Fall back to expression inference for untyped cases
                 match init {
                     Some(Expr::New { class_name, .. }) => {
                         // Native handle-based classes use f64 (handles bitcast to f64), not i64 pointers
                         let is_native_handle_class = matches!(class_name.as_str(),
-                            "Decimal" | "Big" | "BigNumber" | "LRUCache" | "Command");
-                        (Some(class_name.clone()), !is_native_handle_class, false, false, false, false, false, false, false)
+                            "Decimal" | "Big" | "BigNumber" | "LRUCache" | "Command" | "EventEmitter");
+                        let is_event_emitter = class_name == "EventEmitter";
+                        (Some(class_name.clone()), !is_native_handle_class, false, false, false, false, false, false, false, is_event_emitter)
                     }
-                    Some(Expr::Array(_)) | Some(Expr::ArraySpread(_)) | Some(Expr::ProcessArgv) => (None, true, true, false, false, false, false, false, false),
+                    Some(Expr::Array(_)) | Some(Expr::ArraySpread(_)) | Some(Expr::ProcessArgv) => (None, true, true, false, false, false, false, false, false, false),
                     // Object literals return object pointers
-                    Some(Expr::Object(_)) => (None, true, false, false, false, false, false, false, false),
+                    Some(Expr::Object(_)) => (None, true, false, false, false, false, false, false, false, false),
                     // ArrayMap, ArrayFilter, ArraySlice, and ArraySplice return arrays
                     Some(Expr::ArrayMap { .. }) | Some(Expr::ArrayFilter { .. }) |
-                    Some(Expr::ArraySlice { .. }) | Some(Expr::ArraySplice { .. }) => (None, true, true, false, false, false, false, false, false),
+                    Some(Expr::ArraySlice { .. }) | Some(Expr::ArraySplice { .. }) => (None, true, true, false, false, false, false, false, false, false),
                     // MapNew returns a Map pointer
-                    Some(Expr::MapNew) => (None, true, false, false, false, false, true, false, false),
+                    Some(Expr::MapNew) => (None, true, false, false, false, false, true, false, false, false),
                     // SetNew returns a Set pointer
-                    Some(Expr::SetNew) => (None, true, false, false, false, false, false, true, false),
+                    Some(Expr::SetNew) => (None, true, false, false, false, false, false, true, false, false),
                     // Buffer expressions return buffer pointers
-                    Some(expr) if is_buffer_expr(expr) => (None, true, false, false, false, false, false, false, true),
-                    Some(Expr::Closure { .. }) => (None, true, false, false, false, true, false, false, false),
-                    Some(expr) if is_bigint_expr(expr, locals) => (None, true, false, false, true, false, false, false, false),
-                    Some(expr) if is_string_expr(expr, locals) => (None, false, false, true, false, false, false, false, false),
-                    Some(expr) if is_closure_expr(expr, locals, closure_returning_funcs) => (None, true, false, false, false, true, false, false, false),
+                    Some(expr) if is_buffer_expr(expr) => (None, true, false, false, false, false, false, false, true, false),
+                    Some(Expr::Closure { .. }) => (None, true, false, false, false, true, false, false, false, false),
+                    Some(expr) if is_bigint_expr(expr, locals) => (None, true, false, false, true, false, false, false, false, false),
+                    Some(expr) if is_string_expr(expr, locals) => (None, false, false, true, false, false, false, false, false, false),
+                    Some(expr) if is_closure_expr(expr, locals, closure_returning_funcs) => (None, true, false, false, false, true, false, false, false, false),
                     // JsonParse returns any type - mark as union for dynamic typeof
-                    Some(Expr::JsonParse(_)) => (None, false, false, false, false, false, false, false, false),
+                    Some(Expr::JsonParse(_)) => (None, false, false, false, false, false, false, false, false, false),
                     // Await expression - the result could be any type, mark as pointer/union for proper typeof
-                    Some(Expr::Await(_)) => (None, true, false, false, false, false, false, false, false),
+                    Some(Expr::Await(_)) => (None, true, false, false, false, false, false, false, false, false),
                     // Function call - check if the function returns a pointer type (i64)
                     // Also check for array method calls like .map(), .filter(), .slice() which return arrays
                     Some(Expr::Call { callee, .. }) => {
@@ -10661,42 +10699,42 @@ fn compile_stmt(
                                 match hir_ret_type {
                                     perry_types::Type::Generic { base, .. } if base == "Map" => {
                                         // Function returns Map<K, V>
-                                        (None, true, false, false, false, false, true, false, false)
+                                        (None, true, false, false, false, false, true, false, false, false)
                                     }
                                     perry_types::Type::Generic { base, .. } if base == "Set" => {
                                         // Function returns Set<T>
-                                        (None, true, false, false, false, false, false, true, false)
+                                        (None, true, false, false, false, false, false, true, false, false)
                                     }
                                     perry_types::Type::Array(_) => {
                                         // Function returns Array<T>
-                                        (None, true, true, false, false, false, false, false, false)
+                                        (None, true, true, false, false, false, false, false, false, false)
                                     }
                                     perry_types::Type::String => {
                                         // Function returns string
-                                        (None, false, false, true, false, false, false, false, false)
+                                        (None, false, false, true, false, false, false, false, false, false)
                                     }
                                     _ => {
                                         // Check ABI type for other pointer types
                                         if let Some(&ret_type) = func_return_types.get(func_id) {
                                             if ret_type == types::I64 {
-                                                (None, true, false, false, false, false, false, false, false)
+                                                (None, true, false, false, false, false, false, false, false, false)
                                             } else {
-                                                (None, false, false, false, false, false, false, false, false)
+                                                (None, false, false, false, false, false, false, false, false, false)
                                             }
                                         } else {
-                                            (None, false, false, false, false, false, false, false, false)
+                                            (None, false, false, false, false, false, false, false, false, false)
                                         }
                                     }
                                 }
                             } else if let Some(&ret_type) = func_return_types.get(func_id) {
                                 if ret_type == types::I64 {
                                     // Function returns i64 (string/array/object pointer)
-                                    (None, true, false, false, false, false, false, false, false)
+                                    (None, true, false, false, false, false, false, false, false, false)
                                 } else {
-                                    (None, false, false, false, false, false, false, false, false)
+                                    (None, false, false, false, false, false, false, false, false, false)
                                 }
                             } else {
-                                (None, false, false, false, false, false, false, false, false)
+                                (None, false, false, false, false, false, false, false, false, false)
                             }
                         } else if let Expr::PropertyGet { object, property } = callee.as_ref() {
                             // Check for array methods that return arrays
@@ -10706,46 +10744,46 @@ fn compile_stmt(
                                     if let Some(src_info) = locals.get(id) {
                                         if src_info.is_string {
                                             // String.slice returns NaN-boxed string (f64, not i64 pointer)
-                                            (None, false, false, true, false, false, false, false, false)
+                                            (None, false, false, true, false, false, false, false, false, false)
                                         } else if src_info.is_array {
                                             // Array.slice returns array
-                                            (None, true, true, false, false, false, false, false, false)
+                                            (None, true, true, false, false, false, false, false, false, false)
                                         } else {
-                                            (None, false, false, false, false, false, false, false, false)
+                                            (None, false, false, false, false, false, false, false, false, false)
                                         }
                                     } else {
-                                        (None, false, false, false, false, false, false, false, false)
+                                        (None, false, false, false, false, false, false, false, false, false)
                                     }
                                 } else {
-                                    (None, false, false, false, false, false, false, false, false)
+                                    (None, false, false, false, false, false, false, false, false, false)
                                 }
                             } else if property == "substring" || property == "trim" || property == "toLowerCase"
                                 || property == "toUpperCase" || property == "charAt" || property == "padStart"
                                 || property == "padEnd" || property == "repeat" || property == "replace" {
                                 // String methods that return NaN-boxed strings (f64, not i64 pointers)
                                 // is_pointer must be false so the variable uses f64 type
-                                (None, false, false, true, false, false, false, false, false)
+                                (None, false, false, true, false, false, false, false, false, false)
                             } else if property == "map" || property == "filter" ||
                                property == "concat" || property == "flat" || property == "flatMap" ||
                                property == "reverse" || property == "sort" || property == "toSorted" ||
                                property == "toReversed" || property == "with" {
-                                (None, true, true, false, false, false, false, false, false)
+                                (None, true, true, false, false, false, false, false, false, false)
                             } else {
-                                (None, false, false, false, false, false, false, false, false)
+                                (None, false, false, false, false, false, false, false, false, false)
                             }
                         } else {
-                            (None, false, false, false, false, false, false, false, false)
+                            (None, false, false, false, false, false, false, false, false, false)
                         }
                     }
                     // LocalGet inherits pointer-ness from source variable
                     Some(Expr::LocalGet(src_id)) => {
                         if let Some(src_info) = locals.get(src_id) {
-                            (src_info.class_name.clone(), src_info.is_pointer, src_info.is_array, src_info.is_string, src_info.is_bigint, src_info.is_closure, src_info.is_map, src_info.is_set, src_info.is_buffer)
+                            (src_info.class_name.clone(), src_info.is_pointer, src_info.is_array, src_info.is_string, src_info.is_bigint, src_info.is_closure, src_info.is_map, src_info.is_set, src_info.is_buffer, src_info.is_event_emitter)
                         } else {
-                            (None, false, false, false, false, false, false, false, false)
+                            (None, false, false, false, false, false, false, false, false, false)
                         }
                     }
-                    _ => (None, false, false, false, false, false, false, false, false),
+                    _ => (None, false, false, false, false, false, false, false, false, false),
                 }
             };
 
@@ -10953,7 +10991,7 @@ fn compile_stmt(
 
             let i32_shadow: Option<Variable> = None;
 
-            locals.insert(*id, LocalInfo { var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: false, is_map, is_set, is_buffer, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None });
+            locals.insert(*id, LocalInfo { var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: false, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None });
         }
         Stmt::Return(expr) => {
             // Get expected return type from function signature
@@ -12262,7 +12300,7 @@ fn compile_stmt(
                         is_bigint: false,
                         is_closure: false,
                         is_boxed: false,
-                        is_map: false, is_set: false, is_buffer: false, is_union: false,
+                        is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
                         is_mixed_array: false,
                         is_integer: false,
                         is_integer_array: false,
@@ -12948,7 +12986,7 @@ fn compile_stmt(
                         is_closure: false,
                         is_boxed: false,
                         // Caught exceptions can be any type, so mark as union for runtime type checking
-                        is_map: false, is_set: false, is_buffer: false, is_union: true,
+                        is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: true,
                         is_mixed_array: false,
                         is_integer: false,
                         is_integer_array: false,
@@ -13279,8 +13317,12 @@ fn compile_expr(
             let call = builder.ins().call(alloc_ref, &[slot_addr, len_val]);
             let bigint_ptr = builder.inst_results(call)[0];
 
-            // Return as f64-bitcasted pointer
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), bigint_ptr))
+            // NaN-box the BigInt pointer for proper type identification
+            let nanbox_func = extern_funcs.get("js_nanbox_bigint")
+                .ok_or_else(|| anyhow!("js_nanbox_bigint not declared"))?;
+            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+            let nanbox_call = builder.ins().call(nanbox_ref, &[bigint_ptr]);
+            Ok(builder.inst_results(nanbox_call)[0])
         }
         Expr::EnumMember { enum_name, member_name } => {
             // Look up the enum member value
@@ -16607,14 +16649,28 @@ fn compile_expr(
                     .ok_or_else(|| anyhow!("{} not declared", func_name))?;
                 let func_ref = module.declare_func_in_func(*bigint_func, builder.func);
 
-                // Convert to i64 pointers (only if not already i64)
-                let lhs_ptr = ensure_i64(builder, lhs);
-                let rhs_ptr = ensure_i64(builder, rhs);
+                // Extract BigInt pointers from NaN-boxed values
+                let get_bigint_func = extern_funcs.get("js_nanbox_get_bigint")
+                    .ok_or_else(|| anyhow!("js_nanbox_get_bigint not declared"))?;
+                let get_bigint_ref = module.declare_func_in_func(*get_bigint_func, builder.func);
+
+                let lhs_f64 = ensure_f64(builder, lhs);
+                let lhs_call = builder.ins().call(get_bigint_ref, &[lhs_f64]);
+                let lhs_ptr = builder.inst_results(lhs_call)[0];
+
+                let rhs_f64 = ensure_f64(builder, rhs);
+                let rhs_call = builder.ins().call(get_bigint_ref, &[rhs_f64]);
+                let rhs_ptr = builder.inst_results(rhs_call)[0];
 
                 let call = builder.ins().call(func_ref, &[lhs_ptr, rhs_ptr]);
                 let result_ptr = builder.inst_results(call)[0];
 
-                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
+                // NaN-box the result BigInt pointer
+                let nanbox_func = extern_funcs.get("js_nanbox_bigint")
+                    .ok_or_else(|| anyhow!("js_nanbox_bigint not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                return Ok(builder.inst_results(nanbox_call)[0]);
             }
 
             // Check if both operands are integers for native i64 arithmetic optimization
@@ -17035,19 +17091,65 @@ fn compile_expr(
                 let cmp = builder.ins().icmp(icc, lhs_i64, rhs_i64);
                 Ok(builder.ins().select(cmp, one, zero))
             } else {
-                // Regular float comparison - ensure both operands are f64
-                let lhs_f64 = ensure_f64(builder, lhs);
-                let rhs_f64 = ensure_f64(builder, rhs);
-                let cc = match op {
-                    CompareOp::Eq => FloatCC::Equal,
-                    CompareOp::Ne => FloatCC::NotEqual,
-                    CompareOp::Lt => FloatCC::LessThan,
-                    CompareOp::Le => FloatCC::LessThanOrEqual,
-                    CompareOp::Gt => FloatCC::GreaterThan,
-                    CompareOp::Ge => FloatCC::GreaterThanOrEqual,
-                };
-                let cmp = builder.ins().fcmp(cc, lhs_f64, rhs_f64);
-                Ok(builder.ins().select(cmp, one, zero))
+                // Check if this is a BigInt comparison
+                fn is_bigint_compare_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                    match expr {
+                        Expr::BigInt(_) => true,
+                        Expr::LocalGet(id) => locals.get(id).map(|i| i.is_bigint).unwrap_or(false),
+                        Expr::Binary { left, right, .. } => {
+                            is_bigint_compare_expr(left, locals) || is_bigint_compare_expr(right, locals)
+                        }
+                        _ => false,
+                    }
+                }
+
+                let is_bigint_compare = is_bigint_compare_expr(left, locals) || is_bigint_compare_expr(right, locals);
+
+                if is_bigint_compare {
+                    // BigInt comparison - use js_bigint_cmp
+                    let get_bigint_func = extern_funcs.get("js_nanbox_get_bigint")
+                        .ok_or_else(|| anyhow!("js_nanbox_get_bigint not declared"))?;
+                    let get_bigint_ref = module.declare_func_in_func(*get_bigint_func, builder.func);
+
+                    let lhs_f64 = ensure_f64(builder, lhs);
+                    let lhs_call = builder.ins().call(get_bigint_ref, &[lhs_f64]);
+                    let lhs_ptr = builder.inst_results(lhs_call)[0];
+
+                    let rhs_f64 = ensure_f64(builder, rhs);
+                    let rhs_call = builder.ins().call(get_bigint_ref, &[rhs_f64]);
+                    let rhs_ptr = builder.inst_results(rhs_call)[0];
+
+                    let cmp_func = extern_funcs.get("js_bigint_cmp")
+                        .ok_or_else(|| anyhow!("js_bigint_cmp not declared"))?;
+                    let cmp_ref = module.declare_func_in_func(*cmp_func, builder.func);
+                    let cmp_call = builder.ins().call(cmp_ref, &[lhs_ptr, rhs_ptr]);
+                    let cmp_result = builder.inst_results(cmp_call)[0]; // -1, 0, or 1
+
+                    // Convert cmp result to boolean based on operation
+                    let result_bool = match op {
+                        CompareOp::Eq => builder.ins().icmp_imm(IntCC::Equal, cmp_result, 0),
+                        CompareOp::Ne => builder.ins().icmp_imm(IntCC::NotEqual, cmp_result, 0),
+                        CompareOp::Lt => builder.ins().icmp_imm(IntCC::SignedLessThan, cmp_result, 0),
+                        CompareOp::Le => builder.ins().icmp_imm(IntCC::SignedLessThanOrEqual, cmp_result, 0),
+                        CompareOp::Gt => builder.ins().icmp_imm(IntCC::SignedGreaterThan, cmp_result, 0),
+                        CompareOp::Ge => builder.ins().icmp_imm(IntCC::SignedGreaterThanOrEqual, cmp_result, 0),
+                    };
+                    Ok(builder.ins().select(result_bool, one, zero))
+                } else {
+                    // Regular float comparison - ensure both operands are f64
+                    let lhs_f64 = ensure_f64(builder, lhs);
+                    let rhs_f64 = ensure_f64(builder, rhs);
+                    let cc = match op {
+                        CompareOp::Eq => FloatCC::Equal,
+                        CompareOp::Ne => FloatCC::NotEqual,
+                        CompareOp::Lt => FloatCC::LessThan,
+                        CompareOp::Le => FloatCC::LessThanOrEqual,
+                        CompareOp::Gt => FloatCC::GreaterThan,
+                        CompareOp::Ge => FloatCC::GreaterThanOrEqual,
+                    };
+                    let cmp = builder.ins().fcmp(cc, lhs_f64, rhs_f64);
+                    Ok(builder.ins().select(cmp, one, zero))
+                }
             }
         }
         Expr::Logical { op, left, right } => {
@@ -18874,6 +18976,123 @@ fn compile_expr(
                                         builder.ins().call(func_ref, &[set_ptr]);
                                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED))); // undefined
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            // Handle EventEmitter method calls
+                            if info.is_event_emitter {
+                                // EventEmitter is stored as f64 (bitcast of i64 handle)
+                                // Extract the handle using js_nanbox_get_pointer
+                                let emitter_f64 = builder.use_var(info.var);
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                let ptr_call = builder.ins().call(get_ptr_ref, &[emitter_f64]);
+                                let handle = builder.inst_results(ptr_call)[0];
+
+                                match property.as_str() {
+                                    "emit" => {
+                                        // emit(eventName, arg?) - eventName is NaN-boxed string
+                                        let func_name = if arg_vals.len() >= 2 {
+                                            "js_event_emitter_emit"
+                                        } else {
+                                            "js_event_emitter_emit0"
+                                        };
+                                        let emit_func = extern_funcs.get(func_name)
+                                            .ok_or_else(|| anyhow!("{} not declared", func_name))?;
+                                        let func_ref = module.declare_func_in_func(*emit_func, builder.func);
+
+                                        // Extract string pointer from NaN-boxed event name
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let event_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
+                                        let event_ptr = builder.inst_results(event_call)[0];
+
+                                        let mut call_args = vec![handle, event_ptr];
+                                        if arg_vals.len() >= 2 {
+                                            // Ensure arg is f64 (objects/pointers need bitcast)
+                                            call_args.push(ensure_f64(builder, arg_vals[1]));
+                                        }
+
+                                        let call = builder.ins().call(func_ref, &call_args);
+                                        return Ok(builder.inst_results(call)[0]);
+                                    }
+                                    "on" | "addListener" => {
+                                        // on(eventName, callback) - eventName is NaN-boxed string, callback is closure
+                                        let on_func = extern_funcs.get("js_event_emitter_on")
+                                            .ok_or_else(|| anyhow!("js_event_emitter_on not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*on_func, builder.func);
+
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let event_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
+                                        let event_ptr = builder.inst_results(event_call)[0];
+                                        let callback_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1]);
+
+                                        let call = builder.ins().call(func_ref, &[handle, event_ptr, callback_ptr]);
+                                        let _ = builder.inst_results(call)[0];
+                                        // Return emitter for chaining
+                                        return Ok(emitter_f64);
+                                    }
+                                    "removeListener" | "off" => {
+                                        let remove_func = extern_funcs.get("js_event_emitter_remove_listener")
+                                            .ok_or_else(|| anyhow!("js_event_emitter_remove_listener not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*remove_func, builder.func);
+
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let event_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
+                                        let event_ptr = builder.inst_results(event_call)[0];
+                                        let callback_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1]);
+
+                                        let call = builder.ins().call(func_ref, &[handle, event_ptr, callback_ptr]);
+                                        let _ = builder.inst_results(call)[0];
+                                        // Return emitter for chaining
+                                        return Ok(emitter_f64);
+                                    }
+                                    "removeAllListeners" => {
+                                        let remove_all_func = extern_funcs.get("js_event_emitter_remove_all_listeners")
+                                            .ok_or_else(|| anyhow!("js_event_emitter_remove_all_listeners not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*remove_all_func, builder.func);
+
+                                        let event_ptr = if !arg_vals.is_empty() {
+                                            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                            let event_f64 = ensure_f64(builder, arg_vals[0]);
+                                            let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
+                                            builder.inst_results(event_call)[0]
+                                        } else {
+                                            builder.ins().iconst(types::I64, 0) // null for no event name
+                                        };
+
+                                        let call = builder.ins().call(func_ref, &[handle, event_ptr]);
+                                        let _ = builder.inst_results(call)[0];
+                                        // Return emitter for chaining
+                                        return Ok(emitter_f64);
+                                    }
+                                    "listenerCount" => {
+                                        let count_func = extern_funcs.get("js_event_emitter_listener_count")
+                                            .ok_or_else(|| anyhow!("js_event_emitter_listener_count not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*count_func, builder.func);
+
+                                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                        let event_f64 = ensure_f64(builder, arg_vals[0]);
+                                        let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
+                                        let event_ptr = builder.inst_results(event_call)[0];
+
+                                        let call = builder.ins().call(func_ref, &[handle, event_ptr]);
+                                        return Ok(builder.inst_results(call)[0]);
                                     }
                                     _ => {}
                                 }
@@ -24463,6 +24682,9 @@ fn compile_expr(
                     let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
                     let call = builder.ins().call(nanbox_ref, &[result]);
                     Ok(builder.inst_results(call)[0])
+                } else if native_module == "events" && (method == "emit" || method == "listenerCount") {
+                    // emit and listenerCount return f64 directly (boolean/number)
+                    Ok(result)
                 } else if native_module == "mysql2" || native_module == "mysql2/promise" ||
                           native_module == "ioredis" || native_module == "ws" ||
                           native_module == "events" || native_module == "lru-cache" ||

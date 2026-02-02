@@ -37,6 +37,9 @@ const INT32_MASK: u64 = 0x0000_0000_FFFF_FFFF;
 /// String pointer tag: 0x7FFF_XXXX_XXXX_XXXX (48 bits for string pointer)
 const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
 
+/// BigInt pointer tag: 0x7FFA_XXXX_XXXX_XXXX (48 bits for bigint pointer)
+const BIGINT_TAG: u64 = 0x7FFA_0000_0000_0000;
+
 /// JS Handle tag: 0x7FFB_XXXX_XXXX_XXXX (48 bits for handle ID)
 /// This is used by perry-jsruntime to reference V8 objects
 const JS_HANDLE_TAG: u64 = 0x7FFB_0000_0000_0000;
@@ -178,6 +181,12 @@ impl JSValue {
         (self.bits & !POINTER_MASK) == STRING_TAG
     }
 
+    /// Check if this is a BigInt pointer
+    #[inline]
+    pub fn is_bigint(&self) -> bool {
+        (self.bits & !POINTER_MASK) == BIGINT_TAG
+    }
+
     /// Get as f64 (panics if not a number)
     #[inline]
     pub fn as_number(&self) -> f64 {
@@ -267,6 +276,20 @@ impl JSValue {
         (self.bits & POINTER_MASK) as *const crate::string::StringHeader
     }
 
+    /// Create a BigInt pointer value (uses BIGINT_TAG for type discrimination)
+    #[inline]
+    pub fn bigint_ptr(ptr: *mut crate::bigint::BigIntHeader) -> Self {
+        debug_assert!((ptr as u64) <= POINTER_MASK, "Pointer too large for NaN-boxing");
+        Self { bits: BIGINT_TAG | (ptr as u64 & POINTER_MASK) }
+    }
+
+    /// Get BigInt pointer (panics if not a BigInt)
+    #[inline]
+    pub fn as_bigint_ptr(&self) -> *const crate::bigint::BigIntHeader {
+        debug_assert!(self.is_bigint(), "Value is not a BigInt");
+        (self.bits & POINTER_MASK) as *const crate::bigint::BigIntHeader
+    }
+
     /// Create an object pointer value
     #[inline]
     pub fn object_ptr(ptr: *mut u8) -> Self {
@@ -323,6 +346,35 @@ pub extern "C" fn js_nanbox_pointer(ptr: i64) -> f64 {
 pub extern "C" fn js_nanbox_string(ptr: i64) -> f64 {
     let jsval = JSValue::string_ptr(ptr as *mut crate::string::StringHeader);
     f64::from_bits(jsval.bits())
+}
+
+/// Create a NaN-boxed BigInt pointer value from an i64 raw pointer.
+/// Returns the value as f64 for storage in union-typed variables.
+/// This uses BIGINT_TAG (0x7FFA) to distinguish from other pointer types.
+#[no_mangle]
+pub extern "C" fn js_nanbox_bigint(ptr: i64) -> f64 {
+    let jsval = JSValue::bigint_ptr(ptr as *mut crate::bigint::BigIntHeader);
+    f64::from_bits(jsval.bits())
+}
+
+/// Check if an f64 value (interpreted as NaN-boxed) represents a BigInt.
+#[no_mangle]
+pub extern "C" fn js_nanbox_is_bigint(value: f64) -> bool {
+    let jsval = JSValue::from_bits(value.to_bits());
+    jsval.is_bigint()
+}
+
+/// Extract a BigInt pointer from a NaN-boxed f64 value.
+/// Returns the pointer as i64.
+#[no_mangle]
+pub extern "C" fn js_nanbox_get_bigint(value: f64) -> i64 {
+    let jsval = JSValue::from_bits(value.to_bits());
+    if jsval.is_bigint() {
+        jsval.as_bigint_ptr() as i64
+    } else {
+        // Fallback: might be a raw bitcast pointer
+        value.to_bits() as i64
+    }
 }
 
 /// Check if an f64 value (interpreted as NaN-boxed) represents a pointer.

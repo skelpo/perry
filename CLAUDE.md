@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.49
+**Current Version:** 0.2.50
 
 ## Workflow Requirements
 
@@ -130,6 +130,7 @@ TAG_UNDEFINED = 0x7FFC_0000_0000_0001  // undefined value
 TAG_NULL      = 0x7FFC_0000_0000_0002  // null value
 TAG_FALSE     = 0x7FFC_0000_0000_0003  // false
 TAG_TRUE      = 0x7FFC_0000_0000_0004  // true
+BIGINT_TAG    = 0x7FFA_0000_0000_0000  // BigInt pointer (lower 48 bits)
 STRING_TAG    = 0x7FFF_0000_0000_0000  // String pointer (lower 48 bits)
 POINTER_TAG   = 0x7FFD_0000_0000_0000  // Object/Array pointer (lower 48 bits)
 INT32_TAG     = 0x7FFE_0000_0000_0000  // Int32 value (lower 32 bits)
@@ -139,6 +140,8 @@ INT32_TAG     = 0x7FFE_0000_0000_0000  // Int32 value (lower 32 bits)
 
 - `js_nanbox_string(ptr)` - Wrap a string pointer with STRING_TAG
 - `js_nanbox_pointer(ptr)` - Wrap an object/array pointer with POINTER_TAG
+- `js_nanbox_bigint(ptr)` - Wrap a BigInt pointer with BIGINT_TAG
+- `js_nanbox_get_bigint(f64)` - Extract BigInt pointer from NaN-boxed value
 - `js_get_string_pointer_unified(f64)` - Extract raw pointer from NaN-boxed or raw string
 - `js_jsvalue_to_string(f64)` - Convert any NaN-boxed value to string
 - `js_is_truthy(f64)` - Proper JavaScript truthiness semantics
@@ -202,9 +205,23 @@ To test a feature, compile and run:
 cargo run --release -- test_factorial.ts && ./test_factorial
 ```
 
-## Recent Fixes (v0.2.37-0.2.49)
+## Recent Fixes (v0.2.37-0.2.50)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.50
+- Fix critical BigInt corruption - BigInt values were being stored as bitcast pointers instead of NaN-boxed values
+- Add BIGINT_TAG (0x7FFA) for proper BigInt NaN-boxing
+- Add `js_nanbox_bigint(ptr)`, `js_nanbox_get_bigint(f64)`, `js_nanbox_is_bigint(f64)` runtime functions
+- Add `is_bigint()`, `as_bigint_ptr()`, `bigint_ptr()` methods to JSValue
+- Update BigInt literal compilation to use NaN-boxing
+- Update BigInt arithmetic to extract pointers via `js_nanbox_get_bigint` before operations
+- Add BigInt comparison support using `js_bigint_cmp`
+- Update `format_jsvalue` to detect BigInt and format with "n" suffix
+- Fix BigInt function parameters - set `is_bigint` flag based on parameter type
+- Change BigInt ABI from i64 to f64 (NaN-boxed) for consistent handling
+- BigInt addition, subtraction, multiplication, division, comparisons now work correctly
+- BigInt in function parameters and nested expressions now work correctly
 
 ### v0.2.48
 - Fix string.split() returning corrupted array elements

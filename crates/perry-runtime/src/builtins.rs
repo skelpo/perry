@@ -253,6 +253,23 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                 let bytes = std::slice::from_raw_parts(data, len);
                 std::str::from_utf8(bytes).unwrap_or("[invalid utf8]").to_string()
             }
+        } else if jsval.is_bigint() {
+            // Format BigInt by converting to string
+            let ptr = jsval.as_bigint_ptr();
+            if ptr.is_null() {
+                "null".to_string()
+            } else {
+                let str_ptr = crate::bigint::js_bigint_to_string(ptr);
+                if str_ptr.is_null() {
+                    "0n".to_string()
+                } else {
+                    let len = (*str_ptr).length as usize;
+                    let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                    let bytes = std::slice::from_raw_parts(data, len);
+                    let num_str = std::str::from_utf8(bytes).unwrap_or("0");
+                    format!("{}n", num_str)
+                }
+            }
         } else if jsval.is_pointer() {
             let ptr: *const crate::array::ArrayHeader = jsval.as_pointer();
             if ptr.is_null() {
