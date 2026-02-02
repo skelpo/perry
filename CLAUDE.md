@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.50
+**Current Version:** 0.2.51
 
 ## Workflow Requirements
 
@@ -205,9 +205,17 @@ To test a feature, compile and run:
 cargo run --release -- test_factorial.ts && ./test_factorial
 ```
 
-## Recent Fixes (v0.2.37-0.2.50)
+## Recent Fixes (v0.2.37-0.2.51)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.51
+- Fix boolean representation - use NaN-boxed TAG_TRUE/TAG_FALSE (0x7FFC_0000_0000_0004/0003) instead of 0.0/1.0
+- Fix boolean comparison - use integer comparison on bit patterns instead of fcmp (NaN != NaN)
+- Fix console.log boolean literals - route through js_console_log_dynamic for proper formatting
+- Fix array printing crash (SIGSEGV) - check array validity before accessing object keys_array
+- Add JSON-like object formatting to console.log output with format_object_as_json and format_jsvalue_for_json
+- Improve array/object detection in format_jsvalue to safely handle pointers
 
 ### v0.2.50
 - Fix critical BigInt corruption - BigInt values were being stored as bitcast pointers instead of NaN-boxed values

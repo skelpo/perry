@@ -62,8 +62,8 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
             }
         }
     } else if jsval.is_pointer() {
-        // Object/array pointer - for now just print [object Object]
-        println!("[object Object]");
+        // Object/array pointer - format as JSON
+        println!("{}", format_jsvalue(value, 0));
     } else if jsval.is_int32() {
         println!("{}", jsval.as_int32());
     } else {
@@ -125,7 +125,8 @@ pub extern "C" fn js_console_error_dynamic(value: f64) {
             }
         }
     } else if jsval.is_pointer() {
-        eprintln!("[object Object]");
+        // Object/array pointer - format as JSON
+        eprintln!("{}", format_jsvalue(value, 0));
     } else if jsval.is_int32() {
         eprintln!("{}", jsval.as_int32());
     } else {
@@ -186,7 +187,8 @@ pub extern "C" fn js_console_warn_dynamic(value: f64) {
             }
         }
     } else if jsval.is_pointer() {
-        eprintln!("[object Object]");
+        // Object/array pointer - format as JSON
+        eprintln!("{}", format_jsvalue(value, 0));
     } else if jsval.is_int32() {
         eprintln!("{}", jsval.as_int32());
     } else {
@@ -275,14 +277,16 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             if ptr.is_null() {
                 "null".to_string()
             } else {
-                // Check if this is an array by reading its header
-                // Arrays have a valid length and capacity
+                // First check if this looks like an array by examining ArrayHeader fields
+                // ArrayHeader has length (u32) and capacity (u32), so check if they look valid
                 let maybe_arr = ptr;
                 let length = (*maybe_arr).length as usize;
                 let capacity = (*maybe_arr).capacity as usize;
 
                 // Heuristic: if capacity >= length and both are reasonable, it's likely an array
-                if capacity >= length && length < 1_000_000 && capacity < 10_000_000 {
+                if capacity >= length && length < 1_000_000 && capacity < 10_000_000
+                    && capacity > 0 // arrays have non-zero capacity
+                {
                     // Format as array
                     let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
                     let mut parts: Vec<String> = Vec::with_capacity(length);
@@ -292,7 +296,17 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                     }
                     format!("[{}]", parts.join(", "))
                 } else {
-                    "[object Object]".to_string()
+                    // Try to check if it's an object with keys_array
+                    let obj_ptr = ptr as *const crate::object::ObjectHeader;
+                    let keys_array = (*obj_ptr).keys_array;
+
+                    if !keys_array.is_null() {
+                        // This is an object with keys - format as JSON
+                        format_object_as_json(obj_ptr, depth)
+                    } else {
+                        // Class instance without keys_array
+                        "[object Object]".to_string()
+                    }
                 }
             }
         } else if jsval.is_int32() {
@@ -311,6 +325,157 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             }
         }
     }
+}
+
+/// Format an object as JSON-like string
+/// Reads keys from the keys_array and values from the fields
+unsafe fn format_object_as_json(obj_ptr: *const crate::object::ObjectHeader, depth: usize) -> String {
+    if depth > 10 {
+        return "{...}".to_string();
+    }
+
+    let keys_array = (*obj_ptr).keys_array;
+    if keys_array.is_null() {
+        return "{}".to_string();
+    }
+
+    let key_count = crate::array::js_array_length(keys_array) as usize;
+    if key_count == 0 {
+        return "{}".to_string();
+    }
+
+    let mut parts: Vec<String> = Vec::with_capacity(key_count);
+
+    for i in 0..key_count {
+        // Get the key (NaN-boxed string pointer)
+        let key_val = crate::array::js_array_get(keys_array, i as u32);
+        let key_str = if key_val.is_string() {
+            let key_ptr = key_val.as_string_ptr();
+            if key_ptr.is_null() {
+                continue;
+            }
+            let len = (*key_ptr).length as usize;
+            let data = (key_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+            let bytes = std::slice::from_raw_parts(data, len);
+            std::str::from_utf8(bytes).unwrap_or("").to_string()
+        } else {
+            continue;
+        };
+
+        // Get the value
+        let value = crate::object::js_object_get_field_f64(obj_ptr, i as u32);
+        let value_str = format_jsvalue_for_json(value, depth + 1);
+
+        parts.push(format!("{}: {}", key_str, value_str));
+    }
+
+    format!("{{ {} }}", parts.join(", "))
+}
+
+/// Format a JSValue for JSON output (strings get quotes)
+fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
+    if depth > 10 {
+        return "\"...\"".to_string();
+    }
+
+    let jsval = JSValue::from_bits(value.to_bits());
+
+    unsafe {
+        if jsval.is_undefined() {
+            "undefined".to_string()
+        } else if jsval.is_null() {
+            "null".to_string()
+        } else if jsval.is_bool() {
+            jsval.as_bool().to_string()
+        } else if jsval.is_string() {
+            let ptr = jsval.as_string_ptr();
+            if ptr.is_null() {
+                "null".to_string()
+            } else {
+                let len = (*ptr).length as usize;
+                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                let bytes = std::slice::from_raw_parts(data, len);
+                let s = std::str::from_utf8(bytes).unwrap_or("[invalid utf8]");
+                // Escape and quote strings for JSON-like output
+                format!("'{}'", escape_string(s))
+            }
+        } else if jsval.is_bigint() {
+            let ptr = jsval.as_bigint_ptr();
+            if ptr.is_null() {
+                "null".to_string()
+            } else {
+                let str_ptr = crate::bigint::js_bigint_to_string(ptr);
+                if str_ptr.is_null() {
+                    "0n".to_string()
+                } else {
+                    let len = (*str_ptr).length as usize;
+                    let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                    let bytes = std::slice::from_raw_parts(data, len);
+                    let num_str = std::str::from_utf8(bytes).unwrap_or("0");
+                    format!("{}n", num_str)
+                }
+            }
+        } else if jsval.is_pointer() {
+            let ptr: *const crate::array::ArrayHeader = jsval.as_pointer();
+            if ptr.is_null() {
+                "null".to_string()
+            } else {
+                // Check if it's an object with keys
+                let obj_ptr = ptr as *const crate::object::ObjectHeader;
+                let keys_array = (*obj_ptr).keys_array;
+
+                if !keys_array.is_null() {
+                    format_object_as_json(obj_ptr, depth)
+                } else {
+                    // Check if array
+                    let maybe_arr = ptr;
+                    let length = (*maybe_arr).length as usize;
+                    let capacity = (*maybe_arr).capacity as usize;
+
+                    if capacity >= length && length < 1_000_000 && capacity < 10_000_000 {
+                        let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
+                        let mut parts: Vec<String> = Vec::with_capacity(length);
+                        for i in 0..length {
+                            let elem_value = *data_ptr.add(i);
+                            parts.push(format_jsvalue_for_json(elem_value, depth + 1));
+                        }
+                        format!("[{}]", parts.join(", "))
+                    } else {
+                        "[object Object]".to_string()
+                    }
+                }
+            }
+        } else if jsval.is_int32() {
+            jsval.as_int32().to_string()
+        } else {
+            let n = value;
+            if n.is_nan() {
+                "NaN".to_string()
+            } else if n.is_infinite() {
+                if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+            } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+                (n as i64).to_string()
+            } else {
+                n.to_string()
+            }
+        }
+    }
+}
+
+/// Escape special characters in a string for display
+fn escape_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => result.push_str("\\\\"),
+            '\'' => result.push_str("\\'"),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            _ => result.push(c),
+        }
+    }
+    result
 }
 
 #[no_mangle]
@@ -348,41 +513,7 @@ pub extern "C" fn js_console_error_spread(arr_ptr: *const crate::array::ArrayHea
         let mut parts: Vec<String> = Vec::with_capacity(length);
         for i in 0..length {
             let value = *data_ptr.add(i);
-            let jsval = JSValue::from_bits(value.to_bits());
-
-            let formatted = if jsval.is_undefined() {
-                "undefined".to_string()
-            } else if jsval.is_null() {
-                "null".to_string()
-            } else if jsval.is_bool() {
-                jsval.as_bool().to_string()
-            } else if jsval.is_string() {
-                let ptr = jsval.as_string_ptr();
-                if ptr.is_null() {
-                    "null".to_string()
-                } else {
-                    let len = (*ptr).length as usize;
-                    let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                    let bytes = std::slice::from_raw_parts(data, len);
-                    std::str::from_utf8(bytes).unwrap_or("[invalid utf8]").to_string()
-                }
-            } else if jsval.is_pointer() {
-                "[object Object]".to_string()
-            } else if jsval.is_int32() {
-                jsval.as_int32().to_string()
-            } else {
-                let n = value;
-                if n.is_nan() {
-                    "NaN".to_string()
-                } else if n.is_infinite() {
-                    if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
-                } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
-                    (n as i64).to_string()
-                } else {
-                    n.to_string()
-                }
-            };
-            parts.push(formatted);
+            parts.push(format_jsvalue(value, 0));
         }
         eprintln!("{}", parts.join(" "));
     }
@@ -410,44 +541,7 @@ pub extern "C" fn js_array_print(arr_ptr: *const crate::array::ArrayHeader) {
         let mut parts: Vec<String> = Vec::with_capacity(length);
         for i in 0..length {
             let value = *data_ptr.add(i);
-            let jsval = JSValue::from_bits(value.to_bits());
-
-            let formatted = if jsval.is_undefined() {
-                "undefined".to_string()
-            } else if jsval.is_null() {
-                "null".to_string()
-            } else if jsval.is_bool() {
-                jsval.as_bool().to_string()
-            } else if jsval.is_string() {
-                let ptr = jsval.as_string_ptr();
-                if ptr.is_null() {
-                    "null".to_string()
-                } else {
-                    let len = (*ptr).length as usize;
-                    let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                    let bytes = std::slice::from_raw_parts(data, len);
-                    // Format strings with quotes for array display
-                    format!("'{}'", std::str::from_utf8(bytes).unwrap_or("[invalid utf8]"))
-                }
-            } else if jsval.is_pointer() {
-                "[object Object]".to_string()
-            } else if jsval.is_int32() {
-                jsval.as_int32().to_string()
-            } else {
-                // Regular number
-                let n = value;
-                if n.is_nan() {
-                    "NaN".to_string()
-                } else if n.is_infinite() {
-                    if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
-                } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
-                    (n as i64).to_string()
-                } else {
-                    n.to_string()
-                }
-            };
-
-            parts.push(formatted);
+            parts.push(format_jsvalue_for_json(value, 0));
         }
         println!("[{}]", parts.join(", "));
     }

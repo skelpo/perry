@@ -1890,10 +1890,13 @@ impl Compiler {
         let mut data_desc = DataDescription::new();
 
         // Initialize with the field's init value or 0.0
+        // For booleans, use NaN-boxed tags
+        const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+        const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
         let init_value: f64 = match &field.init {
             Some(Expr::Number(n)) => *n,
             Some(Expr::Integer(n)) => *n as f64,
-            Some(Expr::Bool(b)) => if *b { 1.0 } else { 0.0 },
+            Some(Expr::Bool(b)) => f64::from_bits(if *b { TAG_TRUE } else { TAG_FALSE }),
             _ => 0.0, // Default to 0.0 for other types
         };
 
@@ -13214,7 +13217,13 @@ fn compile_expr(
         Expr::Number(n) => Ok(builder.ins().f64const(*n)),
         Expr::Integer(n) => Ok(builder.ins().f64const(*n as f64)),
         Expr::Bool(b) => {
-            Ok(builder.ins().f64const(if *b { 1.0 } else { 0.0 }))
+            // Use NaN-boxed boolean tags for proper identification
+            // TAG_TRUE = 0x7FFC_0000_0000_0004
+            // TAG_FALSE = 0x7FFC_0000_0000_0003
+            const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+            const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+            let tag = if *b { TAG_TRUE } else { TAG_FALSE };
+            Ok(builder.ins().f64const(f64::from_bits(tag)))
         }
         Expr::String(s) => {
             // Create a string at runtime by storing bytes on the stack
@@ -17136,19 +17145,41 @@ fn compile_expr(
                     };
                     Ok(builder.ins().select(result_bool, one, zero))
                 } else {
-                    // Regular float comparison - ensure both operands are f64
-                    let lhs_f64 = ensure_f64(builder, lhs);
-                    let rhs_f64 = ensure_f64(builder, rhs);
-                    let cc = match op {
-                        CompareOp::Eq => FloatCC::Equal,
-                        CompareOp::Ne => FloatCC::NotEqual,
-                        CompareOp::Lt => FloatCC::LessThan,
-                        CompareOp::Le => FloatCC::LessThanOrEqual,
-                        CompareOp::Gt => FloatCC::GreaterThan,
-                        CompareOp::Ge => FloatCC::GreaterThanOrEqual,
-                    };
-                    let cmp = builder.ins().fcmp(cc, lhs_f64, rhs_f64);
-                    Ok(builder.ins().select(cmp, one, zero))
+                    // Check if this is a boolean comparison (NaN-boxed booleans can't use fcmp)
+                    fn is_bool_expr(expr: &Expr) -> bool {
+                        matches!(expr, Expr::Bool(_))
+                    }
+                    let is_bool_compare = is_bool_expr(left) || is_bool_expr(right);
+
+                    if is_bool_compare && (*op == CompareOp::Eq || *op == CompareOp::Ne) {
+                        // Boolean comparison: NaN-boxed booleans must be compared by bit pattern
+                        // Bitcast f64 to i64 and do integer comparison
+                        let lhs_f64 = ensure_f64(builder, lhs);
+                        let rhs_f64 = ensure_f64(builder, rhs);
+                        let lhs_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), lhs_f64);
+                        let rhs_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), rhs_f64);
+                        let icc = match op {
+                            CompareOp::Eq => IntCC::Equal,
+                            CompareOp::Ne => IntCC::NotEqual,
+                            _ => unreachable!(),
+                        };
+                        let cmp = builder.ins().icmp(icc, lhs_i64, rhs_i64);
+                        Ok(builder.ins().select(cmp, one, zero))
+                    } else {
+                        // Regular float comparison - ensure both operands are f64
+                        let lhs_f64 = ensure_f64(builder, lhs);
+                        let rhs_f64 = ensure_f64(builder, rhs);
+                        let cc = match op {
+                            CompareOp::Eq => FloatCC::Equal,
+                            CompareOp::Ne => FloatCC::NotEqual,
+                            CompareOp::Lt => FloatCC::LessThan,
+                            CompareOp::Le => FloatCC::LessThanOrEqual,
+                            CompareOp::Gt => FloatCC::GreaterThan,
+                            CompareOp::Ge => FloatCC::GreaterThanOrEqual,
+                        };
+                        let cmp = builder.ins().fcmp(cc, lhs_f64, rhs_f64);
+                        Ok(builder.ins().select(cmp, one, zero))
+                    }
                 }
             }
         }
@@ -17824,6 +17855,8 @@ fn compile_expr(
                         // property access on generic objects (not class instances with known types)
                         let is_union_arg = if let Some(arg) = args.first() {
                             match arg {
+                                // Boolean literals need dynamic printing (NaN-boxed)
+                                Expr::Bool(_) => true,
                                 Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union).unwrap_or(false),
                                 // Mixed-type array element access returns a union-like value
                                 Expr::IndexGet { object, .. } => {
