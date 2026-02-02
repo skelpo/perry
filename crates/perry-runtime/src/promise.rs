@@ -15,8 +15,8 @@ pub enum PromiseState {
     Rejected = 2,
 }
 
-/// Callback type for promise handlers
-pub type PromiseCallback = extern "C" fn(f64) -> f64;
+/// Closure pointer type for promise handlers (closures, not raw function pointers)
+pub type ClosurePtr = *const crate::closure::ClosureHeader;
 
 /// A Promise represents an eventual completion (or failure) of an async operation
 #[repr(C)]
@@ -27,10 +27,10 @@ pub struct Promise {
     value: f64,
     /// The rejection reason (if rejected)
     reason: f64,
-    /// Callback to run when fulfilled
-    on_fulfilled: Option<PromiseCallback>,
-    /// Callback to run when rejected
-    on_rejected: Option<PromiseCallback>,
+    /// Closure to run when fulfilled (null if none)
+    on_fulfilled: ClosurePtr,
+    /// Closure to run when rejected (null if none)
+    on_rejected: ClosurePtr,
     /// Next promise in the chain (for .then())
     next: *mut Promise,
 }
@@ -41,8 +41,8 @@ impl Promise {
             state: PromiseState::Pending,
             value: 0.0,
             reason: 0.0,
-            on_fulfilled: None,
-            on_rejected: None,
+            on_fulfilled: ptr::null(),
+            on_rejected: ptr::null(),
             next: ptr::null_mut(),
         }
     }
@@ -102,7 +102,7 @@ pub extern "C" fn js_promise_resolve(promise: *mut Promise, value: f64) {
         (*promise).value = value;
 
         // Schedule callbacks
-        if let Some(callback) = (*promise).on_fulfilled {
+        if !(*promise).on_fulfilled.is_null() {
             TASK_QUEUE.with(|q| {
                 q.borrow_mut().push((promise, value, true));
             });
@@ -124,7 +124,7 @@ pub extern "C" fn js_promise_reject(promise: *mut Promise, reason: f64) {
         (*promise).reason = reason;
 
         // Schedule callbacks
-        if let Some(callback) = (*promise).on_rejected {
+        if !(*promise).on_rejected.is_null() {
             TASK_QUEUE.with(|q| {
                 q.borrow_mut().push((promise, reason, false));
             });
@@ -136,8 +136,8 @@ pub extern "C" fn js_promise_reject(promise: *mut Promise, reason: f64) {
 #[no_mangle]
 pub extern "C" fn js_promise_then(
     promise: *mut Promise,
-    on_fulfilled: Option<PromiseCallback>,
-    on_rejected: Option<PromiseCallback>,
+    on_fulfilled: ClosurePtr,
+    on_rejected: ClosurePtr,
 ) -> *mut Promise {
     if promise.is_null() {
         return ptr::null_mut();
@@ -153,14 +153,14 @@ pub extern "C" fn js_promise_then(
         // If already settled, schedule callback immediately
         match (*promise).state {
             PromiseState::Fulfilled => {
-                if on_fulfilled.is_some() {
+                if !on_fulfilled.is_null() {
                     TASK_QUEUE.with(|q| {
                         q.borrow_mut().push((promise, (*promise).value, true));
                     });
                 }
             }
             PromiseState::Rejected => {
-                if on_rejected.is_some() {
+                if !on_rejected.is_null() {
                     TASK_QUEUE.with(|q| {
                         q.borrow_mut().push((promise, (*promise).reason, false));
                     });
@@ -178,9 +178,9 @@ pub extern "C" fn js_promise_then(
 #[no_mangle]
 pub extern "C" fn js_promise_catch(
     promise: *mut Promise,
-    on_rejected: Option<PromiseCallback>,
+    on_rejected: ClosurePtr,
 ) -> *mut Promise {
-    js_promise_then(promise, None, on_rejected)
+    js_promise_then(promise, ptr::null(), on_rejected)
 }
 
 /// Register finally callback, returns a new promise for chaining
@@ -188,7 +188,7 @@ pub extern "C" fn js_promise_catch(
 #[no_mangle]
 pub extern "C" fn js_promise_finally(
     promise: *mut Promise,
-    on_finally: Option<PromiseCallback>,
+    on_finally: ClosurePtr,
 ) -> *mut Promise {
     // For finally, we pass the same callback for both fulfilled and rejected
     // The finally callback doesn't receive any arguments in JS
@@ -220,14 +220,16 @@ pub extern "C" fn js_promise_run_microtasks() -> i32 {
             Some((promise, value, is_fulfilled)) => {
                 unsafe {
                     let result = if is_fulfilled {
-                        if let Some(callback) = (*promise).on_fulfilled {
-                            callback(value)
+                        let callback = (*promise).on_fulfilled;
+                        if !callback.is_null() {
+                            crate::closure::js_closure_call1(callback, value)
                         } else {
                             value
                         }
                     } else {
-                        if let Some(callback) = (*promise).on_rejected {
-                            callback(value)
+                        let callback = (*promise).on_rejected;
+                        if !callback.is_null() {
+                            crate::closure::js_closure_call1(callback, value)
                         } else {
                             value
                         }

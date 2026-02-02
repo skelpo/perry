@@ -525,14 +525,16 @@ impl Compiler {
         for stmt in init_stmts {
             if let Stmt::Let { id, name, ty, init, .. } = stmt {
                 // Determine if this variable is a pointer type
-                let is_pointer = matches!(ty, HirType::String | HirType::Array(_) |
+                // Note: String is NOT included because strings are now NaN-boxed (f64 values)
+                let is_pointer = matches!(ty, HirType::Array(_) |
                     HirType::Object(_) | HirType::Named(_) | HirType::Generic { .. } |
                     HirType::Function(_));
 
                 // Also check the init expression type for better inference
+                // Note: Expr::String is NOT included because strings are now NaN-boxed (f64 values)
                 let is_pointer_from_init = if let Some(init_expr) = init {
                     matches!(init_expr,
-                        Expr::String(_) | Expr::Array(_) | Expr::Object(_) |
+                        Expr::Array(_) | Expr::Object(_) |
                         Expr::New { .. } | Expr::ArraySpread(_) |
                         Expr::Closure { .. } | Expr::MapNew | Expr::SetNew |
                         // JS interop expressions return pointers
@@ -4219,6 +4221,19 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_promise_resolved".to_string(), func_id);
+        }
+
+        // js_promise_rejected(reason: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // reason
+            sig.returns.push(AbiParam::new(types::I64)); // promise pointer
+            let func_id = self.module.declare_function(
+                "js_promise_rejected",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_promise_rejected".to_string(), func_id);
         }
 
         // js_promise_run_microtasks() -> i32
@@ -16361,10 +16376,11 @@ fn compile_expr(
                             // Assume it's a string pointer stored as f64 - just bitcast back to i64
                             ensure_i64(builder, lhs_val)
                         } else {
-                            // Number to string conversion
-                            let num_to_str_func = extern_funcs.get("js_number_to_string")
-                                .ok_or_else(|| anyhow!("js_number_to_string not declared"))?;
-                            let func_ref = module.declare_func_in_func(*num_to_str_func, builder.func);
+                            // Unknown f64 - could be NaN-boxed string or number
+                            // Use js_jsvalue_to_string which handles both cases
+                            let jsvalue_to_str_func = extern_funcs.get("js_jsvalue_to_string")
+                                .ok_or_else(|| anyhow!("js_jsvalue_to_string not declared"))?;
+                            let func_ref = module.declare_func_in_func(*jsvalue_to_str_func, builder.func);
                             let call = builder.ins().call(func_ref, &[lhs_val]);
                             builder.inst_results(call)[0]
                         }
@@ -16424,10 +16440,11 @@ fn compile_expr(
                             // Assume it's a string pointer stored as f64 - just bitcast back to i64
                             ensure_i64(builder, rhs_val)
                         } else {
-                            // Number to string conversion
-                            let num_to_str_func = extern_funcs.get("js_number_to_string")
-                                .ok_or_else(|| anyhow!("js_number_to_string not declared"))?;
-                            let func_ref = module.declare_func_in_func(*num_to_str_func, builder.func);
+                            // Unknown f64 - could be NaN-boxed string or number
+                            // Use js_jsvalue_to_string which handles both cases
+                            let jsvalue_to_str_func = extern_funcs.get("js_jsvalue_to_string")
+                                .ok_or_else(|| anyhow!("js_jsvalue_to_string not declared"))?;
+                            let func_ref = module.declare_func_in_func(*jsvalue_to_str_func, builder.func);
                             let call = builder.ins().call(func_ref, &[rhs_val]);
                             builder.inst_results(call)[0]
                         }
@@ -18104,6 +18121,38 @@ fn compile_expr(
                                     }
                                 };
                                 let call = builder.ins().call(func_ref, &[value]);
+                                let promise_ptr = builder.inst_results(call)[0];
+                                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr));
+                            }
+                        }
+                    }
+
+                    // Handle Promise.reject()
+                    if property == "reject" {
+                        // Check if object is a global (Promise)
+                        if let Expr::GlobalGet(_) = object.as_ref() {
+                            // Assume it's Promise.reject(reason)
+                            if let Some(func_id) = extern_funcs.get("js_promise_rejected") {
+                                let func_ref = module.declare_func_in_func(*func_id, builder.func);
+                                let reason = if arg_vals.is_empty() {
+                                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                    builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)) // undefined
+                                } else {
+                                    let arg_val = arg_vals[0];
+                                    let arg_type = builder.func.dfg.value_type(arg_val);
+                                    if arg_type == types::I64 {
+                                        // Pointer value (array/object/string) - NaN-box it
+                                        let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                            .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                        let call = builder.ins().call(nanbox_ref, &[arg_val]);
+                                        builder.inst_results(call)[0]
+                                    } else {
+                                        // Already f64 (number)
+                                        arg_val
+                                    }
+                                };
+                                let call = builder.ins().call(func_ref, &[reason]);
                                 let promise_ptr = builder.inst_results(call)[0];
                                 return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr));
                             }
@@ -22345,7 +22394,13 @@ fn compile_expr(
                 let obj_ptr = builder.inst_results(call)[0];
 
                 let key_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, index, this_ctx)?;
-                let key_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), key_val);
+                // String keys are now NaN-boxed - extract the actual pointer
+                let key_f64 = ensure_f64(builder, key_val);
+                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                let str_call = builder.ins().call(get_str_ptr_ref, &[key_f64]);
+                let key_ptr = builder.inst_results(str_call)[0];
 
                 let get_func = extern_funcs.get("js_object_get_field_by_name_f64")
                     .ok_or_else(|| anyhow!("js_object_get_field_by_name_f64 not declared"))?;
@@ -22649,7 +22704,13 @@ fn compile_expr(
                 // String key - use js_object_set_field_by_name
                 // Compile the index as a string pointer
                 let key_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, index, this_ctx)?;
-                let key_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), key_val);
+                // String keys are now NaN-boxed - extract the actual pointer
+                let key_f64 = ensure_f64(builder, key_val);
+                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                let str_call = builder.ins().call(get_str_ptr_ref, &[key_f64]);
+                let key_ptr = builder.inst_results(str_call)[0];
 
                 // Ensure value is f64 as the runtime function expects f64
                 let val_f64 = ensure_f64(builder, val);
