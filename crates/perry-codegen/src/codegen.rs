@@ -23649,6 +23649,24 @@ fn compile_expr(
                     } else {
                         obj_val
                     }
+                } else if native_module == "mysql2" || native_module == "mysql2/promise" ||
+                          native_module == "ioredis" || native_module == "ws" ||
+                          native_module == "events" || native_module == "lru-cache" ||
+                          native_module == "commander" || native_module == "ethers" ||
+                          native_module == "decimal.js" || native_module == "big.js" ||
+                          native_module == "bignumber.js" || native_module == "pg" ||
+                          native_module == "mongodb" || native_module == "better-sqlite3" ||
+                          native_module == "sharp" || native_module == "cheerio" ||
+                          native_module == "nodemailer" || native_module == "dayjs" ||
+                          native_module == "moment" || native_module == "node-cron" ||
+                          native_module == "rate-limiter-flexible" {
+                    // These modules return NaN-boxed pointers, extract the raw pointer
+                    let obj_f64 = ensure_f64(builder, obj_val);
+                    let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                        .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                    let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                    let call = builder.ins().call(get_ptr_ref, &[obj_f64]);
+                    builder.inst_results(call)[0]
                 } else {
                     ensure_i64(builder, obj_val)
                 };
@@ -23658,15 +23676,26 @@ fn compile_expr(
                 // For query/execute, convert string argument to pointer
                 if method == "query" || method == "execute" {
                     if !arg_vals.is_empty() {
-                        // SQL string is passed as pointer
-                        let sql_ptr = ensure_i64(builder, arg_vals[0]);
+                        // SQL string is NaN-boxed, extract the raw string pointer
+                        let sql_f64 = ensure_f64(builder, arg_vals[0]);
+                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                        let str_call = builder.ins().call(get_str_ptr_ref, &[sql_f64]);
+                        let sql_ptr = builder.inst_results(str_call)[0];
                         call_args.push(sql_ptr);
                     }
                     // For execute, always add params array (as i64 pointer)
                     // If no params provided, use null (0)
                     if method == "execute" {
                         if arg_vals.len() > 1 {
-                            let params_ptr = ensure_i64(builder, arg_vals[1]);
+                            // Params array is NaN-boxed, extract the raw pointer
+                            let params_f64 = ensure_f64(builder, arg_vals[1]);
+                            let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                            let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                            let ptr_call = builder.ins().call(get_ptr_ref, &[params_f64]);
+                            let params_ptr = builder.inst_results(ptr_call)[0];
                             call_args.push(params_ptr);
                         } else {
                             // No params provided - pass null
@@ -23677,25 +23706,45 @@ fn compile_expr(
                     // ioredis methods: set(key, value), get(key), del(key), exists(key), incr(key), decr(key), expire(key, secs), quit()
                     match method.as_str() {
                         "set" => {
-                            // set(key, value) - both are strings
+                            // set(key, value) - both are NaN-boxed strings
                             if arg_vals.len() >= 2 {
-                                let key_ptr = ensure_i64(builder, arg_vals[0]);
-                                let val_ptr = ensure_i64(builder, arg_vals[1]);
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+
+                                let key_f64 = ensure_f64(builder, arg_vals[0]);
+                                let key_call = builder.ins().call(get_str_ptr_ref, &[key_f64]);
+                                let key_ptr = builder.inst_results(key_call)[0];
+
+                                let val_f64 = ensure_f64(builder, arg_vals[1]);
+                                let val_call = builder.ins().call(get_str_ptr_ref, &[val_f64]);
+                                let val_ptr = builder.inst_results(val_call)[0];
+
                                 call_args.push(key_ptr);
                                 call_args.push(val_ptr);
                             }
                         }
                         "get" | "del" | "exists" | "incr" | "decr" => {
-                            // Single key argument
+                            // Single key argument - NaN-boxed string
                             if !arg_vals.is_empty() {
-                                let key_ptr = ensure_i64(builder, arg_vals[0]);
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                let key_f64 = ensure_f64(builder, arg_vals[0]);
+                                let key_call = builder.ins().call(get_str_ptr_ref, &[key_f64]);
+                                let key_ptr = builder.inst_results(key_call)[0];
                                 call_args.push(key_ptr);
                             }
                         }
                         "expire" => {
-                            // expire(key, seconds)
+                            // expire(key, seconds) - key is NaN-boxed string
                             if arg_vals.len() >= 2 {
-                                let key_ptr = ensure_i64(builder, arg_vals[0]);
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                let key_f64 = ensure_f64(builder, arg_vals[0]);
+                                let key_call = builder.ins().call(get_str_ptr_ref, &[key_f64]);
+                                let key_ptr = builder.inst_results(key_call)[0];
                                 call_args.push(key_ptr);
                                 call_args.push(arg_vals[1]); // seconds as f64
                             }
@@ -23709,9 +23758,14 @@ fn compile_expr(
                     // ws methods: send(message), close(), isOpen(), receive(), messageCount(), waitForMessage(timeout)
                     match method.as_str() {
                         "send" => {
-                            // send(message) - message is string
+                            // send(message) - message is NaN-boxed string
                             if !arg_vals.is_empty() {
-                                let msg_ptr = ensure_i64(builder, arg_vals[0]);
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                let msg_f64 = ensure_f64(builder, arg_vals[0]);
+                                let msg_call = builder.ins().call(get_str_ptr_ref, &[msg_f64]);
+                                let msg_ptr = builder.inst_results(msg_call)[0];
                                 call_args.push(msg_ptr);
                             }
                         }
@@ -23730,18 +23784,28 @@ fn compile_expr(
                     // EventEmitter methods: on(event, callback), emit(event, arg), removeListener(event, callback), etc.
                     match method.as_str() {
                         "on" | "removeListener" | "off" => {
-                            // on(eventName, callback) - eventName is string, callback is closure
+                            // on(eventName, callback) - eventName is NaN-boxed string, callback is closure
                             if arg_vals.len() >= 2 {
-                                let event_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                let event_f64 = ensure_f64(builder, arg_vals[0]);
+                                let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
+                                let event_ptr = builder.inst_results(event_call)[0];
                                 let callback_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1]);
                                 call_args.push(event_ptr);
                                 call_args.push(callback_ptr);
                             }
                         }
                         "emit" => {
-                            // emit(eventName, arg) - eventName is string, arg is any
+                            // emit(eventName, arg) - eventName is NaN-boxed string, arg is any
                             if !arg_vals.is_empty() {
-                                let event_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                let event_f64 = ensure_f64(builder, arg_vals[0]);
+                                let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
+                                let event_ptr = builder.inst_results(event_call)[0];
                                 call_args.push(event_ptr);
                                 if arg_vals.len() >= 2 {
                                     // Ensure arg is f64 (objects/pointers need bitcast)
@@ -23752,18 +23816,28 @@ fn compile_expr(
                             }
                         }
                         "removeAllListeners" => {
-                            // removeAllListeners(eventName?) - eventName is optional string
+                            // removeAllListeners(eventName?) - eventName is optional NaN-boxed string
                             if !arg_vals.is_empty() {
-                                let event_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                let event_f64 = ensure_f64(builder, arg_vals[0]);
+                                let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
+                                let event_ptr = builder.inst_results(event_call)[0];
                                 call_args.push(event_ptr);
                             } else {
                                 call_args.push(builder.ins().iconst(types::I64, 0)); // null for no event name
                             }
                         }
                         "listenerCount" => {
-                            // listenerCount(eventName) - eventName is string
+                            // listenerCount(eventName) - eventName is NaN-boxed string
                             if !arg_vals.is_empty() {
-                                let event_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                let event_f64 = ensure_f64(builder, arg_vals[0]);
+                                let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
+                                let event_ptr = builder.inst_results(event_call)[0];
                                 call_args.push(event_ptr);
                             }
                         }
@@ -24186,6 +24260,18 @@ fn compile_expr(
                     // path functions all return string pointers - NaN-box with STRING_TAG
                     let nanbox_func = extern_funcs.get("js_nanbox_string")
                         .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                    let call = builder.ins().call(nanbox_ref, &[result]);
+                    Ok(builder.inst_results(call)[0])
+                } else if native_module == "mysql2" || native_module == "mysql2/promise" ||
+                          native_module == "ioredis" || native_module == "ws" ||
+                          native_module == "events" || native_module == "lru-cache" ||
+                          native_module == "commander" || native_module == "ethers" ||
+                          native_module == "decimal.js" || native_module == "big.js" ||
+                          native_module == "bignumber.js" {
+                    // These modules return object pointers - NaN-box with POINTER_TAG
+                    let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                        .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
                     let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
                     let call = builder.ins().call(nanbox_ref, &[result]);
                     Ok(builder.inst_results(call)[0])
