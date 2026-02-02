@@ -13031,9 +13031,25 @@ fn compile_stmt(
             builder.seal_block(merge_block);
         }
         Stmt::Switch { discriminant, cases } => {
+            // Check if this is a string switch (any case has a string literal test)
+            let is_string_switch = cases.iter().any(|c| {
+                matches!(c.test.as_ref(), Some(Expr::String(_)))
+            });
+
             // Evaluate the discriminant once
             let disc_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, discriminant, this_ctx)?;
             let disc_val = ensure_f64(builder, disc_val_raw);
+
+            // For string switches, extract the discriminant string pointer once
+            let disc_str_ptr = if is_string_switch {
+                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                let disc_call = builder.ins().call(get_str_ptr_ref, &[disc_val]);
+                Some(builder.inst_results(disc_call)[0])
+            } else {
+                None
+            };
 
             // Create blocks for each case body and a merge block
             let merge_block = builder.create_block();
@@ -13061,7 +13077,25 @@ fn compile_stmt(
                     // Compare discriminant with case value
                     let test_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, test_expr, this_ctx)?;
                     let test_val = ensure_f64(builder, test_val_raw);
-                    let eq = builder.ins().fcmp(FloatCC::Equal, disc_val, test_val);
+
+                    let eq = if is_string_switch {
+                        // String comparison: use js_string_equals
+                        let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                        let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                        let test_call = builder.ins().call(get_str_ptr_ref, &[test_val]);
+                        let test_str_ptr = builder.inst_results(test_call)[0];
+
+                        let equals_func = extern_funcs.get("js_string_equals")
+                            .ok_or_else(|| anyhow!("js_string_equals not declared"))?;
+                        let equals_ref = module.declare_func_in_func(*equals_func, builder.func);
+                        let cmp_call = builder.ins().call(equals_ref, &[disc_str_ptr.unwrap(), test_str_ptr]);
+                        let result = builder.inst_results(cmp_call)[0]; // i32 bool
+                        builder.ins().icmp_imm(IntCC::NotEqual, result, 0)
+                    } else {
+                        // Numeric comparison
+                        builder.ins().fcmp(FloatCC::Equal, disc_val, test_val)
+                    };
 
                     // If equal, jump to case body; otherwise, try next case
                     let next_test = if i + 1 < cases.len() {
@@ -16859,9 +16893,18 @@ fn compile_expr(
 
             if is_static_string_compare && (*op == CompareOp::Eq || *op == CompareOp::Ne) {
                 // Static string comparison: use js_string_equals
-                // Convert f64-bitcasted pointers to i64
-                let lhs_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), lhs);
-                let rhs_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), rhs);
+                // Strings are NaN-boxed, extract raw pointers using js_get_string_pointer_unified
+                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+
+                let lhs_f64 = ensure_f64(builder, lhs);
+                let lhs_call = builder.ins().call(get_str_ptr_ref, &[lhs_f64]);
+                let lhs_ptr = builder.inst_results(lhs_call)[0];
+
+                let rhs_f64 = ensure_f64(builder, rhs);
+                let rhs_call = builder.ins().call(get_str_ptr_ref, &[rhs_f64]);
+                let rhs_ptr = builder.inst_results(rhs_call)[0];
 
                 let equals_func = extern_funcs.get("js_string_equals")
                     .ok_or_else(|| anyhow!("js_string_equals not declared"))?;

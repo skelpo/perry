@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.43
+**Current Version:** 0.2.44
 
 ## Workflow Requirements
 
@@ -202,7 +202,11 @@ To test a feature, compile and run:
 cargo run --release -- test_factorial.ts && ./test_factorial
 ```
 
-## Recent Fixes (v0.2.37-0.2.42)
+## Recent Fixes (v0.2.37-0.2.44)
+
+### v0.2.44
+- Fix string `===` comparison SIGSEGV - extract string pointers from NaN-boxed values
+- Fix switch statements with string cases - use `js_string_equals` instead of `fcmp`
 
 ### v0.2.42
 - Fix native module method calls (pool.execute, redis.get, etc.) crashing with SIGSEGV
