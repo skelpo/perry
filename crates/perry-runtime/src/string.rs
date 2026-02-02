@@ -535,15 +535,19 @@ pub extern "C" fn js_string_split(s: *const StringHeader, delimiter: *const Stri
     };
 
     // Allocate array to hold string pointers
-    // We store pointers as f64 (bitcast) since arrays currently use f64 storage
+    // We store NaN-boxed string pointers (with STRING_TAG) since arrays use f64 storage
+    const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
+    const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
     let arr = crate::array::js_array_alloc(parts.len() as u32);
     unsafe {
         (*arr).length = parts.len() as u32;
         let elements_ptr = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
         for (i, ptr) in parts.iter().enumerate() {
-            // Store the pointer as f64 bits
+            // NaN-box the string pointer with STRING_TAG
             let ptr_as_u64 = *ptr as u64;
-            let ptr_as_f64 = f64::from_bits(ptr_as_u64);
+            let nanboxed = STRING_TAG | (ptr_as_u64 & POINTER_MASK);
+            let ptr_as_f64 = f64::from_bits(nanboxed);
             std::ptr::write(elements_ptr.add(i), ptr_as_f64);
         }
     }
