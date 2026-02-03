@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.67
+**Current Version:** 0.2.68
 
 ## Workflow Requirements
 
@@ -205,9 +205,17 @@ To test a feature, compile and run:
 cargo run --release -- test_factorial.ts && ./test_factorial
 ```
 
-## Recent Fixes (v0.2.37-0.2.67)
+## Recent Fixes (v0.2.37-0.2.68)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.68
+- Fix ioredis `new Redis()` returning number instead of object when called without await
+  - `new Redis()` now works synchronously like real ioredis (connects lazily on first command)
+  - Changed `js_ioredis_new` to return Handle synchronously instead of Promise
+  - NaN-box returned handle with POINTER_TAG so it's recognized as an object
+  - Add ioredis to the list of modules that use `js_nanbox_get_pointer` for method calls
+- This matches real ioredis API where `new Redis()` is synchronous and connection happens lazily
 
 ### v0.2.67
 - Fix native instance method calls returning 0 when instance is awaited

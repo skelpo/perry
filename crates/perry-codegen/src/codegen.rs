@@ -4842,11 +4842,11 @@ impl Compiler {
         // Redis (ioredis) Functions
         // ========================================================================
 
-        // js_ioredis_new(config: i64) -> Promise (i64)
+        // js_ioredis_new(config: i64) -> Handle (i64) - synchronous, connects lazily
         {
             let mut sig = self.module.make_signature();
             sig.params.push(AbiParam::new(types::I64)); // config ptr
-            sig.returns.push(AbiParam::new(types::I64)); // Promise ptr
+            sig.returns.push(AbiParam::new(types::I64)); // Handle (not Promise)
             let func_id = self.module.declare_function("js_ioredis_new", Linkage::Import, &sig)?;
             self.extern_funcs.insert("js_ioredis_new".to_string(), func_id);
         }
@@ -21570,7 +21570,7 @@ fn compile_expr(
             }
 
             // new Redis(config?) - call js_ioredis_new(config)
-            // Returns a Promise that resolves to the Redis connection handle
+            // Returns Handle (u64) synchronously - connects lazily like real ioredis
             if class_name == "Redis" {
                 let new_func = extern_funcs.get("js_ioredis_new")
                     .ok_or_else(|| anyhow!("js_ioredis_new not declared"))?;
@@ -21583,9 +21583,13 @@ fn compile_expr(
                     builder.ins().iconst(types::I64, 0)
                 };
                 let call = builder.ins().call(func_ref, &[config_ptr]);
-                let promise_ptr = builder.inst_results(call)[0];
-                // Return the Promise pointer as f64 (NaN-boxed)
-                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr));
+                let handle = builder.inst_results(call)[0];
+                // NaN-box the handle with POINTER_TAG so it's treated as an object
+                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[handle]);
+                return Ok(builder.inst_results(nanbox_call)[0]);
             }
 
             // new Command() - call js_commander_new()
@@ -24552,11 +24556,9 @@ fn compile_expr(
                 };
 
                 // Handle (i64) is passed as first argument
-                // For fetch module and ioredis, the handle is a numeric ID (1, 2, 3...) stored as f64,
+                // For fetch module, the handle is a numeric ID (1, 2, 3...) stored as f64,
                 // so we need to convert using fcvt_to_sint instead of bitcast.
-                // ioredis: new Redis() returns a Promise that resolves to a numeric connection ID,
-                // not a NaN-boxed pointer, so we must convert the f64 directly to i64.
-                let handle = if native_module == "fetch" || native_module == "node-fetch" || native_module == "ioredis" {
+                let handle = if native_module == "fetch" || native_module == "node-fetch" {
                     // Convert f64 response/connection ID to i64 using truncation
                     let obj_type = builder.func.dfg.value_type(obj_val);
                     if obj_type == types::F64 {
@@ -24565,6 +24567,7 @@ fn compile_expr(
                         obj_val
                     }
                 } else if native_module == "mysql2" || native_module == "mysql2/promise" ||
+                          native_module == "ioredis" ||
                           native_module == "ws" ||
                           native_module == "events" || native_module == "lru-cache" ||
                           native_module == "commander" || native_module == "ethers" ||
