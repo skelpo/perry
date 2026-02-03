@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.59
+**Current Version:** 0.2.63
 
 ## Workflow Requirements
 
@@ -205,9 +205,60 @@ To test a feature, compile and run:
 cargo run --release -- test_factorial.ts && ./test_factorial
 ```
 
-## Recent Fixes (v0.2.37-0.2.59)
+## Recent Fixes (v0.2.37-0.2.63)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.63
+- Fix Cranelift verifier type mismatch errors when passing string/pointer values to certain functions
+- Fix Array.includes() with string values - NaN-box string values and use jsvalue comparison for proper content matching
+- Fix Set.has(), Set.add(), Set.delete() with string values - NaN-box strings for proper comparison
+- Fix function call arguments with i32 type (from loop optimization) not being converted to f64/i64
+  - Added i32 -> f64 conversion using `fcvt_from_sint`
+  - Added i32 -> i64 conversion using `sextend`
+  - Fixed in: FuncRef calls, ExternFuncRef calls, closure calls
+- Add js_closure_call4 support for closures with 4 arguments
+
+### v0.2.62
+- Fix mysql2 pool.query() hanging indefinitely when MySQL server is unavailable
+- Added timeouts to all mysql2 operations to prevent indefinite hangs:
+  - Pool acquire timeout: 10 seconds (when getting connection from pool)
+  - Query timeout: 30 seconds (wraps all query operations with tokio::time::timeout)
+  - Connection timeout: 10 seconds (for createConnection and close operations)
+- Operations now error gracefully with descriptive messages instead of hanging:
+  - "Query timed out after 30 seconds (MySQL server may be unavailable)"
+  - "Connection timed out after 10 seconds (MySQL server may be unavailable)"
+- Affected functions in pool.rs: createPool, pool.query, pool.execute, pool.end
+- Affected functions in connection.rs: createConnection, connection.query,
+  connection.end, beginTransaction, commit, rollback
+
+### v0.2.61
+- Fix Promise.all returning tiny float numbers instead of string values with async promises
+- Root cause: When capturing string variables in closures, raw I64 pointers were bitcast to F64
+  instead of being properly NaN-boxed with STRING_TAG (0x7FFF)
+- Fix 1 (capture storage): When storing captured string/pointer values in closures, use
+  `js_nanbox_string` for strings and `js_nanbox_pointer` for objects/arrays instead of raw bitcast
+- Fix 2 (closure calls): Always use `js_closure_call*` functions when calling local variables
+  (they must be closures if being called), instead of requiring `is_closure` flag to be set
+- Affected pattern: `async function delay(ms, value) { return new Promise(resolve => setTimeout(() => resolve(value), ms)); }`
+  - The `value` parameter was extracted from NaN-box to I64 pointer for efficiency
+  - When captured by inner closure `() => resolve(value)`, the I64 was incorrectly bitcast to F64
+  - This produced tiny denormalized floats like `2.18e-308` when printed
+
+### v0.2.60
+- Fix ioredis SIGSEGV crash when calling Redis methods (set, get, etc.)
+- Root causes fixed:
+  1. **Codegen**: ioredis connection IDs are simple f64 numbers (1.0, 2.0, etc.), not NaN-boxed pointers
+     - Changed from `js_nanbox_get_pointer` to `fcvt_to_sint` for extracting connection handles
+     - Same pattern as fetch response IDs
+  2. **Runtime**: String values from Redis operations must be allocated on main thread
+     - Changed from `queue_promise_resolution` to `queue_deferred_resolution` for string results
+     - Strings created in async Tokio workers were using invalid thread-local arenas
+  3. **NaN-boxing**: Redis result strings should use STRING_TAG (0x7FFF), not POINTER_TAG (0x7FFD)
+     - Changed all `JSValue::pointer(str as *const u8)` to `JSValue::string_ptr(str)`
+  4. **Symbol collision**: Renamed `js_call_method` to `js_native_call_method` in codegen
+     - Matches the symbol rename done in perry-runtime v0.2.59
+- Note: ioredis API in Perry returns a Promise from `new Redis()`, use `await new Redis()` pattern
 
 ### v0.2.59
 - Fix ethers.js duplicate symbol linker error when using perry-jsruntime
