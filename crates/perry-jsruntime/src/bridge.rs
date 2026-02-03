@@ -22,6 +22,7 @@ const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
 const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
 const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
 const INT32_TAG: u64 = 0x7FFE_0000_0000_0000;
+const BIGINT_TAG: u64 = 0x7FFA_0000_0000_0000;
 
 /// Tag for V8 object handles - these are opaque references to V8 objects
 /// stored in the handle table, NOT native Perry objects
@@ -137,6 +138,15 @@ pub fn native_to_v8<'s>(
         return v8::String::empty(scope).into();
     }
 
+    // Check for BigInt pointer
+    if tag == BIGINT_TAG {
+        let ptr = (bits & POINTER_MASK) as *const u8;
+        if !ptr.is_null() {
+            return native_bigint_to_v8(scope, ptr);
+        }
+        return v8::BigInt::new_from_i64(scope, 0).into();
+    }
+
     // Check for object/array pointer
     if tag == POINTER_TAG {
         let ptr = (bits & POINTER_MASK) as *const u8;
@@ -196,6 +206,13 @@ pub fn v8_to_native(scope: &mut v8::HandleScope<'_>, value: v8::Local<v8::Value>
         let rust_str = v8_str.to_rust_string_lossy(scope);
         let ptr = rust_string_to_native(&rust_str);
         return f64::from_bits(STRING_TAG | (ptr as u64 & POINTER_MASK));
+    }
+
+    // Check for BigInt (used by ethers.js and other blockchain libraries)
+    if value.is_big_int() {
+        let bigint = v8::Local::<v8::BigInt>::try_from(value).unwrap();
+        let ptr = v8_bigint_to_native(scope, bigint);
+        return f64::from_bits(BIGINT_TAG | (ptr as u64 & POINTER_MASK));
     }
 
     // For functions, always store as JS handle to preserve callability
@@ -280,6 +297,56 @@ fn native_object_to_v8<'s>(scope: &mut v8::HandleScope<'s>, ptr: *const u8) -> v
     obj.into()
 }
 
+/// Convert a native BigInt pointer to a V8 BigInt
+fn native_bigint_to_v8<'s>(scope: &mut v8::HandleScope<'s>, ptr: *const u8) -> v8::Local<'s, v8::Value> {
+    use perry_runtime::bigint::BigIntHeader;
+
+    if ptr.is_null() {
+        return v8::BigInt::new_from_i64(scope, 0).into();
+    }
+
+    let header = ptr as *const BigIntHeader;
+    let limbs = unsafe { (*header).limbs };
+
+    // Check if the value fits in i64 (most common case)
+    if limbs[1] == 0 && limbs[2] == 0 && limbs[3] == 0 {
+        // Fits in a single limb - check sign
+        let val = limbs[0];
+        if val <= i64::MAX as u64 {
+            return v8::BigInt::new_from_i64(scope, val as i64).into();
+        }
+        // Value is positive but too large for i64, use u64
+        return v8::BigInt::new_from_u64(scope, val).into();
+    }
+
+    // Check if it's a negative number (two's complement: high bit set in top limb)
+    let is_negative = (limbs[3] >> 63) == 1;
+
+    if is_negative {
+        // Convert from two's complement to magnitude
+        let mut magnitude = limbs;
+        // Subtract 1 and invert
+        let mut borrow = 1u64;
+        for limb in magnitude.iter_mut() {
+            let (result, underflow) = limb.overflowing_sub(borrow);
+            *limb = !result;
+            borrow = if underflow { 1 } else { 0 };
+        }
+        // Find the actual word count (trim trailing zeros)
+        let word_count = magnitude.iter().rposition(|&x| x != 0).map(|i| i + 1).unwrap_or(1);
+        v8::BigInt::new_from_words(scope, true, &magnitude[..word_count])
+            .map(|bi| bi.into())
+            .unwrap_or_else(|| v8::BigInt::new_from_i64(scope, 0).into())
+    } else {
+        // Positive number with multiple limbs
+        // Find the actual word count (trim trailing zeros)
+        let word_count = limbs.iter().rposition(|&x| x != 0).map(|i| i + 1).unwrap_or(1);
+        v8::BigInt::new_from_words(scope, false, &limbs[..word_count])
+            .map(|bi| bi.into())
+            .unwrap_or_else(|| v8::BigInt::new_from_i64(scope, 0).into())
+    }
+}
+
 /// Convert a V8 object to a native object pointer
 fn v8_object_to_native(scope: &mut v8::HandleScope<'_>, obj: v8::Local<v8::Object>) -> *mut u8 {
     use perry_runtime::{js_object_alloc, js_object_set_field};
@@ -346,6 +413,61 @@ fn v8_array_to_native(scope: &mut v8::HandleScope<'_>, array: v8::Local<v8::Arra
     }
 
     native_array as *mut u8
+}
+
+/// Convert a V8 BigInt to a native BigInt pointer
+fn v8_bigint_to_native(_scope: &mut v8::HandleScope<'_>, bigint: v8::Local<v8::BigInt>) -> *mut u8 {
+    use perry_runtime::bigint::BigIntHeader;
+    use std::alloc::{alloc, Layout};
+
+    // Get the word count to determine the size needed
+    let word_count = bigint.word_count();
+
+    // Allocate a BigIntHeader (4 x u64 = 256 bits)
+    let layout = Layout::new::<BigIntHeader>();
+    let ptr = unsafe { alloc(layout) as *mut BigIntHeader };
+    if ptr.is_null() {
+        panic!("Failed to allocate BigInt");
+    }
+
+    if word_count == 0 {
+        // Zero value
+        unsafe {
+            (*ptr).limbs = [0, 0, 0, 0];
+        }
+        return ptr as *mut u8;
+    }
+
+    // Get the words from V8 BigInt
+    let mut words = vec![0u64; word_count];
+    let (sign_bit, _) = bigint.to_words_array(&mut words);
+
+    // Copy words to our BigIntHeader (up to 4 limbs / 256 bits)
+    unsafe {
+        let mut limbs = [0u64; 4];
+        for (i, &word) in words.iter().enumerate().take(4) {
+            limbs[i] = word;
+        }
+
+        // Handle negative numbers (two's complement for 256 bits)
+        if sign_bit {
+            // Negate: invert all bits and add 1
+            for limb in limbs.iter_mut() {
+                *limb = !*limb;
+            }
+            // Add 1
+            let mut carry = 1u64;
+            for limb in limbs.iter_mut() {
+                let (result, overflow) = limb.overflowing_add(carry);
+                *limb = result;
+                carry = if overflow { 1 } else { 0 };
+            }
+        }
+
+        (*ptr).limbs = limbs;
+    }
+
+    ptr as *mut u8
 }
 
 /// Convert a native array pointer to a V8 array

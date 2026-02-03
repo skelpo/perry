@@ -2,5 +2,8 @@
   "devDependencies": {
     "mongodb": "^7.0.0",
     "zod": "^4.3.5"
+  },
+  "dependencies": {
+    "ethers": "^6.16.0"
   }
 }

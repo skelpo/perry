@@ -4280,6 +4280,33 @@ impl Compiler {
             self.extern_funcs.insert("js_promise_value".to_string(), func_id);
         }
 
+        // js_promise_reason(promise: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // promise pointer
+            sig.returns.push(AbiParam::new(types::F64)); // reason
+            let func_id = self.module.declare_function(
+                "js_promise_reason",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_promise_reason".to_string(), func_id);
+        }
+
+        // js_promise_result(promise: i64) -> f64
+        // Returns value if fulfilled, reason if rejected
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // promise pointer
+            sig.returns.push(AbiParam::new(types::F64)); // result (value or reason)
+            let func_id = self.module.declare_function(
+                "js_promise_result",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_promise_result".to_string(), func_id);
+        }
+
         // js_promise_resolved(value: f64) -> i64
         {
             let mut sig = self.module.make_signature();
@@ -23700,28 +23727,43 @@ fn compile_expr(
         }
         Expr::Await(inner) => {
             // Evaluate the inner expression (should be a Promise pointer)
-            let promise_f64 = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, inner, this_ctx)?;
-            // Extract the actual pointer from the NaN-boxed value
-            // This handles both raw pointers (bitcast) and NaN-boxed pointers (with POINTER_TAG)
-            let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
-                .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
-            let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
-            let call = builder.ins().call(get_ptr_ref, &[promise_f64]);
-            let promise_ptr = builder.inst_results(call)[0];
+            let promise_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, inner, this_ctx)?;
 
-            // Implement a busy-wait loop that runs microtasks until the promise resolves
+            // Get the promise pointer. The value could be:
+            // - I64: raw pointer (from function returning Promise type, or async function call)
+            // - F64: NaN-boxed pointer (from Promise.resolve/reject, variables, etc.)
+            let promise_val_type = builder.func.dfg.value_type(promise_val);
+            let promise_ptr = if promise_val_type == types::I64 {
+                // Already an I64 pointer, use directly
+                promise_val
+            } else {
+                // F64 - need to extract the pointer from NaN-boxed value
+                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                let call = builder.ins().call(get_ptr_ref, &[promise_val]);
+                builder.inst_results(call)[0]
+            };
+
+            // Implement a busy-wait loop that runs microtasks until the promise settles
             //
             // Structure:
-            //   check_block: check state, if pending -> wait_block, else -> done_block
+            //   check_block: check state, if pending -> wait_block, else -> settled_block
             //   wait_block: run microtasks, jump to check_block
+            //   settled_block: check if rejected -> reject_block, else -> done_block
+            //   reject_block: get reason and throw
             //   done_block: get value and continue
 
             let check_block = builder.create_block();
             let wait_block = builder.create_block();
+            let settled_block = builder.create_block();
+            let reject_block = builder.create_block();
             let done_block = builder.create_block();
 
             // Pass the promise pointer as a block parameter to maintain SSA
             builder.append_block_param(check_block, types::I64);
+            builder.append_block_param(settled_block, types::I64);
+            builder.append_block_param(reject_block, types::I64);
             builder.append_block_param(done_block, types::I64);
 
             // Jump to check_block with the promise pointer
@@ -23742,8 +23784,8 @@ fn compile_expr(
             let zero = builder.ins().iconst(types::I32, 0);
             let is_pending = builder.ins().icmp(IntCC::Equal, state, zero);
 
-            // If pending, go to wait_block; otherwise go to done_block
-            builder.ins().brif(is_pending, wait_block, &[], done_block, &[check_promise_ptr]);
+            // If pending, go to wait_block; otherwise go to settled_block
+            builder.ins().brif(is_pending, wait_block, &[], settled_block, &[check_promise_ptr]);
 
             // === wait_block: run microtasks, sleep briefly, and loop back ===
             builder.switch_to_block(wait_block);
@@ -23773,6 +23815,47 @@ fn compile_expr(
 
             // Now seal check_block since both predecessors (entry and wait_block) are done
             builder.seal_block(check_block);
+
+            // === settled_block: check if promise was rejected ===
+            builder.switch_to_block(settled_block);
+            builder.seal_block(settled_block);
+            let settled_promise_ptr = builder.block_params(settled_block)[0];
+
+            // Get the state again to check if rejected
+            let call = builder.ins().call(state_ref, &[settled_promise_ptr]);
+            let settled_state = builder.inst_results(call)[0];
+
+            // Check if state == 2 (rejected)
+            let two = builder.ins().iconst(types::I32, 2);
+            let is_rejected = builder.ins().icmp(IntCC::Equal, settled_state, two);
+
+            // If rejected, go to reject_block; otherwise go to done_block
+            builder.ins().brif(is_rejected, reject_block, &[settled_promise_ptr], done_block, &[settled_promise_ptr]);
+
+            // === reject_block: get reason and throw ===
+            builder.switch_to_block(reject_block);
+            builder.seal_block(reject_block);
+            let reject_promise_ptr = builder.block_params(reject_block)[0];
+
+            // Get the rejection reason
+            let reason_func = extern_funcs.get("js_promise_reason")
+                .ok_or_else(|| anyhow!("js_promise_reason not declared"))?;
+            let reason_ref = module.declare_func_in_func(*reason_func, builder.func);
+            let call = builder.ins().call(reason_ref, &[reject_promise_ptr]);
+            let reason = builder.inst_results(call)[0];
+
+            // Throw the rejection reason
+            let throw_func = extern_funcs.get("js_throw")
+                .ok_or_else(|| anyhow!("js_throw not declared"))?;
+            let throw_ref = module.declare_func_in_func(*throw_func, builder.func);
+            builder.ins().call(throw_ref, &[reason]);
+
+            // js_throw never returns, but Cranelift needs a terminator
+            let unreachable_block = builder.create_block();
+            builder.ins().jump(unreachable_block, &[]);
+            builder.switch_to_block(unreachable_block);
+            builder.seal_block(unreachable_block);
+            builder.ins().trap(TrapCode::user(1).unwrap());
 
             // === done_block: promise is resolved, get the value ===
             builder.switch_to_block(done_block);

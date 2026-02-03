@@ -2,8 +2,213 @@
 
 use perry_runtime::{js_array_alloc, js_array_push, js_object_alloc, js_object_set_field, js_object_set_keys, js_string_from_bytes, JSValue};
 use sqlx::mysql::{MySqlColumn, MySqlRow};
+use sqlx::{Column, Row, TypeInfo};
 
 use super::types::{column_to_field_packet, row_to_js_object};
+
+/// Raw value types for thread-safe data transfer
+#[derive(Clone, Debug)]
+pub enum RawValue {
+    Null,
+    Bool(bool),
+    Int32(i32),
+    Int64(i64),
+    Float64(f64),
+    String(String),
+}
+
+/// Raw column info for thread-safe data transfer
+#[derive(Clone, Debug)]
+pub struct RawColumnInfo {
+    pub name: String,
+    pub type_name: String,
+}
+
+/// Raw row data for thread-safe data transfer
+#[derive(Clone, Debug)]
+pub struct RawRowData {
+    pub values: Vec<(String, RawValue)>,
+}
+
+/// Raw query result for thread-safe data transfer between threads
+#[derive(Clone, Debug)]
+pub struct RawQueryResult {
+    pub rows: Vec<RawRowData>,
+    pub columns: Vec<RawColumnInfo>,
+}
+
+impl RawQueryResult {
+    /// Extract raw data from sqlx rows (call this on worker thread)
+    pub fn from_mysql_rows(rows: Vec<MySqlRow>) -> Self {
+        let columns: Vec<RawColumnInfo> = if !rows.is_empty() {
+            rows[0]
+                .columns()
+                .iter()
+                .map(|col| RawColumnInfo {
+                    name: col.name().to_string(),
+                    type_name: col.type_info().name().to_string(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let raw_rows: Vec<RawRowData> = rows
+            .iter()
+            .map(|row| {
+                let values = row
+                    .columns()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, col)| {
+                        let name = col.name().to_string();
+                        let type_name = col.type_info().name();
+                        let value = extract_raw_value(row, i, type_name);
+                        (name, value)
+                    })
+                    .collect();
+                RawRowData { values }
+            })
+            .collect();
+
+        RawQueryResult {
+            rows: raw_rows,
+            columns,
+        }
+    }
+
+    /// Convert to JSValue (call this on main thread only!)
+    pub fn to_jsvalue(&self) -> JSValue {
+        // Create the result tuple [rows, fields]
+        let mut result_array = js_array_alloc(2);
+
+        // Create rows array
+        let mut rows_array = js_array_alloc(self.rows.len() as u32);
+        for row in &self.rows {
+            let row_obj = raw_row_to_js_object(row, &self.columns);
+            rows_array = js_array_push(rows_array, JSValue::object_ptr(row_obj as *mut u8));
+        }
+        let rows_jsval = JSValue::array_ptr(rows_array);
+        result_array = js_array_push(result_array, rows_jsval);
+
+        // Create fields array
+        let mut fields_array = js_array_alloc(self.columns.len() as u32);
+        for col in &self.columns {
+            let field_obj = raw_column_to_field_packet(col);
+            fields_array = js_array_push(fields_array, JSValue::object_ptr(field_obj as *mut u8));
+        }
+        let fields_jsval = JSValue::array_ptr(fields_array);
+        result_array = js_array_push(result_array, fields_jsval);
+
+        JSValue::array_ptr(result_array)
+    }
+}
+
+/// Extract a raw value from a MySQL row (safe to call on any thread)
+fn extract_raw_value(row: &MySqlRow, index: usize, type_name: &str) -> RawValue {
+    match type_name {
+        "INT" | "TINYINT" | "SMALLINT" | "MEDIUMINT" => {
+            if let Ok(val) = row.try_get::<i32, _>(index) {
+                RawValue::Int32(val)
+            } else {
+                RawValue::Null
+            }
+        }
+        "BIGINT" => {
+            if let Ok(val) = row.try_get::<i64, _>(index) {
+                RawValue::Int64(val)
+            } else {
+                RawValue::Null
+            }
+        }
+        "FLOAT" | "DOUBLE" | "DECIMAL" => {
+            if let Ok(val) = row.try_get::<f64, _>(index) {
+                RawValue::Float64(val)
+            } else {
+                RawValue::Null
+            }
+        }
+        "BOOLEAN" | "BOOL" => {
+            if let Ok(val) = row.try_get::<bool, _>(index) {
+                RawValue::Bool(val)
+            } else {
+                RawValue::Null
+            }
+        }
+        _ => {
+            // Try as string for all other types
+            if let Ok(val) = row.try_get::<String, _>(index) {
+                RawValue::String(val)
+            } else {
+                RawValue::Null
+            }
+        }
+    }
+}
+
+/// Convert a raw row to a JS object (must be called on main thread)
+fn raw_row_to_js_object(
+    row: &RawRowData,
+    _columns: &[RawColumnInfo],
+) -> *mut perry_runtime::ObjectHeader {
+    let obj = js_object_alloc(0, row.values.len() as u32);
+    let mut keys_array = js_array_alloc(row.values.len() as u32);
+
+    for (i, (name, value)) in row.values.iter().enumerate() {
+        // Set the field value
+        let jsval = raw_value_to_jsvalue(value);
+        js_object_set_field(obj, i as u32, jsval);
+
+        // Add column name to keys array
+        let name_ptr = js_string_from_bytes(name.as_ptr(), name.len() as u32);
+        let name_jsval = JSValue::string_ptr(name_ptr);
+        keys_array = js_array_push(keys_array, name_jsval);
+    }
+
+    js_object_set_keys(obj, keys_array);
+    obj
+}
+
+/// Convert a raw value to JSValue (must be called on main thread)
+fn raw_value_to_jsvalue(value: &RawValue) -> JSValue {
+    match value {
+        RawValue::Null => JSValue::null(),
+        RawValue::Bool(b) => JSValue::bool(*b),
+        RawValue::Int32(i) => JSValue::int32(*i),
+        RawValue::Int64(i) => JSValue::number(*i as f64),
+        RawValue::Float64(f) => JSValue::number(*f),
+        RawValue::String(s) => {
+            let str_ptr = js_string_from_bytes(s.as_ptr(), s.len() as u32);
+            JSValue::string_ptr(str_ptr)
+        }
+    }
+}
+
+/// Convert a raw column to a field packet (must be called on main thread)
+fn raw_column_to_field_packet(col: &RawColumnInfo) -> *mut perry_runtime::ObjectHeader {
+    let obj = js_object_alloc(0, 3);
+    let mut keys_array = js_array_alloc(3);
+
+    // Set name
+    let name_ptr = js_string_from_bytes(col.name.as_ptr(), col.name.len() as u32);
+    js_object_set_field(obj, 0, JSValue::string_ptr(name_ptr));
+    let key0 = js_string_from_bytes("name".as_ptr(), 4);
+    keys_array = js_array_push(keys_array, JSValue::string_ptr(key0));
+
+    // Set type
+    let type_ptr = js_string_from_bytes(col.type_name.as_ptr(), col.type_name.len() as u32);
+    js_object_set_field(obj, 1, JSValue::string_ptr(type_ptr));
+    let key1 = js_string_from_bytes("type".as_ptr(), 4);
+    keys_array = js_array_push(keys_array, JSValue::string_ptr(key1));
+
+    // Set length (0 for now)
+    js_object_set_field(obj, 2, JSValue::number(0.0));
+    let key2 = js_string_from_bytes("length".as_ptr(), 6);
+    keys_array = js_array_push(keys_array, JSValue::string_ptr(key2));
+
+    js_object_set_keys(obj, keys_array);
+    obj
+}
 
 /// Convert query results to the mysql2 format: [rows, fields]
 ///

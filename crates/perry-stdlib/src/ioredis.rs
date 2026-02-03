@@ -8,7 +8,7 @@ use redis::AsyncCommands;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::common::async_bridge::{queue_promise_resolution, spawn};
+use crate::common::async_bridge::{queue_deferred_resolution, queue_promise_resolution, spawn};
 
 // Connection handle storage
 lazy_static::lazy_static! {
@@ -46,9 +46,10 @@ pub unsafe extern "C" fn js_ioredis_new(
             Ok(c) => c,
             Err(e) => {
                 let err_msg = format!("Redis connection error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                queue_promise_resolution(promise_ptr, false, err_bits);
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
                 return;
             }
         };
@@ -62,15 +63,16 @@ pub unsafe extern "C" fn js_ioredis_new(
 
                 REDIS_CONNECTIONS.lock().unwrap().insert(conn_id, conn);
 
-                // Return connection handle as f64
+                // Return connection handle as f64 (simple numeric value, no allocation needed)
                 let result_bits = (conn_id as f64).to_bits();
                 queue_promise_resolution(promise_ptr, true, result_bits);
             }
             Err(e) => {
                 let err_msg = format!("Redis connection error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                queue_promise_resolution(promise_ptr, false, err_bits);
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
             }
         }
     });
@@ -92,9 +94,10 @@ pub unsafe extern "C" fn js_ioredis_set(
     let key = match string_from_header(key_ptr) {
         Some(k) => k,
         None => {
+            // Immediate rejection - main thread, safe to allocate
             let err_msg = "Invalid key";
             let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = JSValue::string_ptr(err_str).bits();
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -105,7 +108,7 @@ pub unsafe extern "C" fn js_ioredis_set(
         None => {
             let err_msg = "Invalid value";
             let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = JSValue::string_ptr(err_str).bits();
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -119,10 +122,11 @@ pub unsafe extern "C" fn js_ioredis_set(
             match guard.get(&conn_id) {
                 Some(c) => c.clone(),
                 None => {
-                    let err_msg = "Invalid Redis connection";
-                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                    let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                    queue_promise_resolution(promise_ptr, false, err_bits);
+                    queue_deferred_resolution(promise_ptr, false, || {
+                        let err_msg = "Invalid Redis connection";
+                        let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                        JSValue::string_ptr(err_str).bits()
+                    });
                     return;
                 }
             }
@@ -131,16 +135,19 @@ pub unsafe extern "C" fn js_ioredis_set(
         let result: redis::RedisResult<()> = conn.set(&key, &value).await;
         match result {
             Ok(_) => {
-                let ok_str = "OK";
-                let result_str = js_string_from_bytes(ok_str.as_ptr(), ok_str.len() as u32);
-                let result_bits = JSValue::pointer(result_str as *const u8).bits();
-                queue_promise_resolution(promise_ptr, true, result_bits);
+                // Use deferred resolution to create string on main thread
+                queue_deferred_resolution(promise_ptr, true, || {
+                    let ok_str = "OK";
+                    let result_str = js_string_from_bytes(ok_str.as_ptr(), ok_str.len() as u32);
+                    JSValue::string_ptr(result_str).bits()
+                });
             }
             Err(e) => {
                 let err_msg = format!("Redis SET error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                queue_promise_resolution(promise_ptr, false, err_bits);
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
             }
         }
     });
@@ -163,7 +170,7 @@ pub unsafe extern "C" fn js_ioredis_get(
         None => {
             let err_msg = "Invalid key";
             let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = JSValue::string_ptr(err_str).bits();
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -177,10 +184,11 @@ pub unsafe extern "C" fn js_ioredis_get(
             match guard.get(&conn_id) {
                 Some(c) => c.clone(),
                 None => {
-                    let err_msg = "Invalid Redis connection";
-                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                    let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                    queue_promise_resolution(promise_ptr, false, err_bits);
+                    queue_deferred_resolution(promise_ptr, false, || {
+                        let err_msg = "Invalid Redis connection";
+                        let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                        JSValue::string_ptr(err_str).bits()
+                    });
                     return;
                 }
             }
@@ -189,20 +197,23 @@ pub unsafe extern "C" fn js_ioredis_get(
         let result: redis::RedisResult<Option<String>> = conn.get(&key).await;
         match result {
             Ok(Some(value)) => {
-                let result_str = js_string_from_bytes(value.as_ptr(), value.len() as u32);
-                let result_bits = JSValue::pointer(result_str as *const u8).bits();
-                queue_promise_resolution(promise_ptr, true, result_bits);
+                // Use deferred resolution to create string on main thread
+                queue_deferred_resolution(promise_ptr, true, move || {
+                    let result_str = js_string_from_bytes(value.as_ptr(), value.len() as u32);
+                    JSValue::string_ptr(result_str).bits()
+                });
             }
             Ok(None) => {
-                // Return null (use JSValue::null())
+                // Return null - simple value, no allocation needed
                 let result_bits = JSValue::null().bits();
                 queue_promise_resolution(promise_ptr, true, result_bits);
             }
             Err(e) => {
                 let err_msg = format!("Redis GET error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                queue_promise_resolution(promise_ptr, false, err_bits);
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
             }
         }
     });
@@ -225,7 +236,7 @@ pub unsafe extern "C" fn js_ioredis_del(
         None => {
             let err_msg = "Invalid key";
             let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = JSValue::string_ptr(err_str).bits();
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -239,10 +250,11 @@ pub unsafe extern "C" fn js_ioredis_del(
             match guard.get(&conn_id) {
                 Some(c) => c.clone(),
                 None => {
-                    let err_msg = "Invalid Redis connection";
-                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                    let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                    queue_promise_resolution(promise_ptr, false, err_bits);
+                    queue_deferred_resolution(promise_ptr, false, || {
+                        let err_msg = "Invalid Redis connection";
+                        let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                        JSValue::string_ptr(err_str).bits()
+                    });
                     return;
                 }
             }
@@ -251,14 +263,16 @@ pub unsafe extern "C" fn js_ioredis_del(
         let result: redis::RedisResult<i64> = conn.del(&key).await;
         match result {
             Ok(count) => {
+                // Return number - simple value, no allocation needed
                 let result_bits = (count as f64).to_bits();
                 queue_promise_resolution(promise_ptr, true, result_bits);
             }
             Err(e) => {
                 let err_msg = format!("Redis DEL error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                queue_promise_resolution(promise_ptr, false, err_bits);
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
             }
         }
     });
@@ -281,7 +295,7 @@ pub unsafe extern "C" fn js_ioredis_exists(
         None => {
             let err_msg = "Invalid key";
             let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = JSValue::string_ptr(err_str).bits();
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -295,10 +309,11 @@ pub unsafe extern "C" fn js_ioredis_exists(
             match guard.get(&conn_id) {
                 Some(c) => c.clone(),
                 None => {
-                    let err_msg = "Invalid Redis connection";
-                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                    let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                    queue_promise_resolution(promise_ptr, false, err_bits);
+                    queue_deferred_resolution(promise_ptr, false, || {
+                        let err_msg = "Invalid Redis connection";
+                        let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                        JSValue::string_ptr(err_str).bits()
+                    });
                     return;
                 }
             }
@@ -312,9 +327,10 @@ pub unsafe extern "C" fn js_ioredis_exists(
             }
             Err(e) => {
                 let err_msg = format!("Redis EXISTS error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                queue_promise_resolution(promise_ptr, false, err_bits);
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
             }
         }
     });
@@ -337,7 +353,7 @@ pub unsafe extern "C" fn js_ioredis_incr(
         None => {
             let err_msg = "Invalid key";
             let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = JSValue::string_ptr(err_str).bits();
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -351,10 +367,11 @@ pub unsafe extern "C" fn js_ioredis_incr(
             match guard.get(&conn_id) {
                 Some(c) => c.clone(),
                 None => {
-                    let err_msg = "Invalid Redis connection";
-                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                    let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                    queue_promise_resolution(promise_ptr, false, err_bits);
+                    queue_deferred_resolution(promise_ptr, false, || {
+                        let err_msg = "Invalid Redis connection";
+                        let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                        JSValue::string_ptr(err_str).bits()
+                    });
                     return;
                 }
             }
@@ -368,9 +385,10 @@ pub unsafe extern "C" fn js_ioredis_incr(
             }
             Err(e) => {
                 let err_msg = format!("Redis INCR error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                queue_promise_resolution(promise_ptr, false, err_bits);
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
             }
         }
     });
@@ -393,7 +411,7 @@ pub unsafe extern "C" fn js_ioredis_decr(
         None => {
             let err_msg = "Invalid key";
             let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = JSValue::string_ptr(err_str).bits();
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -407,10 +425,11 @@ pub unsafe extern "C" fn js_ioredis_decr(
             match guard.get(&conn_id) {
                 Some(c) => c.clone(),
                 None => {
-                    let err_msg = "Invalid Redis connection";
-                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                    let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                    queue_promise_resolution(promise_ptr, false, err_bits);
+                    queue_deferred_resolution(promise_ptr, false, || {
+                        let err_msg = "Invalid Redis connection";
+                        let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                        JSValue::string_ptr(err_str).bits()
+                    });
                     return;
                 }
             }
@@ -424,9 +443,10 @@ pub unsafe extern "C" fn js_ioredis_decr(
             }
             Err(e) => {
                 let err_msg = format!("Redis DECR error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                queue_promise_resolution(promise_ptr, false, err_bits);
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
             }
         }
     });
@@ -450,7 +470,7 @@ pub unsafe extern "C" fn js_ioredis_expire(
         None => {
             let err_msg = "Invalid key";
             let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = JSValue::string_ptr(err_str).bits();
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -465,10 +485,11 @@ pub unsafe extern "C" fn js_ioredis_expire(
             match guard.get(&conn_id) {
                 Some(c) => c.clone(),
                 None => {
-                    let err_msg = "Invalid Redis connection";
-                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                    let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                    queue_promise_resolution(promise_ptr, false, err_bits);
+                    queue_deferred_resolution(promise_ptr, false, || {
+                        let err_msg = "Invalid Redis connection";
+                        let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                        JSValue::string_ptr(err_str).bits()
+                    });
                     return;
                 }
             }
@@ -482,9 +503,10 @@ pub unsafe extern "C" fn js_ioredis_expire(
             }
             Err(e) => {
                 let err_msg = format!("Redis EXPIRE error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                queue_promise_resolution(promise_ptr, false, err_bits);
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
             }
         }
     });
@@ -505,10 +527,12 @@ pub unsafe extern "C" fn js_ioredis_quit(
     // Remove connection from storage
     REDIS_CONNECTIONS.lock().unwrap().remove(&conn_id);
 
-    let ok_str = "OK";
-    let result_str = js_string_from_bytes(ok_str.as_ptr(), ok_str.len() as u32);
-    let result_bits = JSValue::pointer(result_str as *const u8).bits();
-    queue_promise_resolution(promise_ptr, true, result_bits);
+    // Use deferred resolution to create string on main thread
+    queue_deferred_resolution(promise_ptr, true, || {
+        let ok_str = "OK";
+        let result_str = js_string_from_bytes(ok_str.as_ptr(), ok_str.len() as u32);
+        JSValue::string_ptr(result_str).bits()
+    });
 
     promise
 }

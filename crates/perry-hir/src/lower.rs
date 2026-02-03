@@ -871,6 +871,33 @@ fn lower_module_decl(
                                 }
                             }
 
+                            // Check if this is an awaited native class instantiation (e.g., await new Redis())
+                            if let ast::Expr::Await(await_expr) = init.as_ref() {
+                                if let ast::Expr::New(new_expr) = await_expr.arg.as_ref() {
+                                    if let ast::Expr::Ident(class_ident) = new_expr.callee.as_ref() {
+                                        let class_name = class_ident.sym.as_ref();
+                                        // Map class names to their modules
+                                        let module_name = match class_name {
+                                            "EventEmitter" => Some("events"),
+                                            "WebSocket" => Some("ws"),
+                                            "Redis" => Some("ioredis"),
+                                            "LRUCache" => Some("lru-cache"),
+                                            "Command" => Some("commander"),
+                                            "Big" => Some("big.js"),
+                                            "Decimal" => Some("decimal.js"),
+                                            "BigNumber" => Some("bignumber.js"),
+                                            // Database clients
+                                            "Pool" => Some("pg"),
+                                            "Client" => Some("pg"),
+                                            _ => None,
+                                        };
+                                        if let Some(native_module) = module_name {
+                                            ctx.register_native_instance(name.clone(), native_module.to_string(), class_name.to_string());
+                                        }
+                                    }
+                                }
+                            }
+
                             // Check if this is a native module factory function call (e.g., mysql.createPool())
                             if let ast::Expr::Call(call_expr) = init.as_ref() {
                                 if let ast::Callee::Expr(callee) = &call_expr.callee {
@@ -4000,6 +4027,116 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                         }
                     }
 
+                    // Check for array methods on imported variables (e.g., import { CHAIN_NAMES } from './module')
+                    // These don't have local IDs but are ExternFuncRef values
+                    if let ast::Callee::Expr(expr) = &call.callee {
+                        if let ast::Expr::Member(member) = expr.as_ref() {
+                            if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                let method_name = method_ident.sym.as_ref();
+                                if let ast::Expr::Ident(arr_ident) = member.obj.as_ref() {
+                                    let arr_name = arr_ident.sym.to_string();
+                                    // Check if this is an imported variable (not a local)
+                                    if ctx.lookup_local(&arr_name).is_none() {
+                                        if let Some(orig_name) = ctx.lookup_imported_func(&arr_name) {
+                                            // This is an imported variable - create ExternFuncRef for it
+                                            let (param_types, return_type) = ctx.lookup_extern_func_types(orig_name)
+                                                .map(|(p, r)| (p.clone(), r.clone()))
+                                                .unwrap_or_else(|| (Vec::new(), Type::Any));
+                                            let extern_ref = Expr::ExternFuncRef {
+                                                name: orig_name.to_string(),
+                                                param_types,
+                                                return_type,
+                                            };
+                                            match method_name {
+                                                "join" => {
+                                                    // arr.join(separator?) -> string
+                                                    let separator = args.into_iter().next().map(Box::new);
+                                                    return Ok(Expr::ArrayJoin {
+                                                        array: Box::new(extern_ref),
+                                                        separator,
+                                                    });
+                                                }
+                                                "map" => {
+                                                    if args.len() >= 1 {
+                                                        return Ok(Expr::ArrayMap {
+                                                            array: Box::new(extern_ref),
+                                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                                        });
+                                                    }
+                                                }
+                                                "filter" => {
+                                                    if args.len() >= 1 {
+                                                        return Ok(Expr::ArrayFilter {
+                                                            array: Box::new(extern_ref),
+                                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                                        });
+                                                    }
+                                                }
+                                                "forEach" => {
+                                                    if args.len() >= 1 {
+                                                        return Ok(Expr::ArrayForEach {
+                                                            array: Box::new(extern_ref),
+                                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                                        });
+                                                    }
+                                                }
+                                                "find" => {
+                                                    if args.len() >= 1 {
+                                                        return Ok(Expr::ArrayFind {
+                                                            array: Box::new(extern_ref),
+                                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                                        });
+                                                    }
+                                                }
+                                                "indexOf" => {
+                                                    if args.len() >= 1 {
+                                                        return Ok(Expr::ArrayIndexOf {
+                                                            array: Box::new(extern_ref),
+                                                            value: Box::new(args.into_iter().next().unwrap()),
+                                                        });
+                                                    }
+                                                }
+                                                "includes" => {
+                                                    if args.len() >= 1 {
+                                                        return Ok(Expr::ArrayIncludes {
+                                                            array: Box::new(extern_ref),
+                                                            value: Box::new(args.into_iter().next().unwrap()),
+                                                        });
+                                                    }
+                                                }
+                                                "slice" => {
+                                                    if args.len() >= 1 {
+                                                        let mut args_iter = args.into_iter();
+                                                        let start = args_iter.next().unwrap();
+                                                        let end = args_iter.next();
+                                                        return Ok(Expr::ArraySlice {
+                                                            array: Box::new(extern_ref),
+                                                            start: Box::new(start),
+                                                            end: end.map(Box::new),
+                                                        });
+                                                    }
+                                                }
+                                                "reduce" => {
+                                                    if args.len() >= 1 {
+                                                        let mut args_iter = args.into_iter();
+                                                        let callback = args_iter.next().unwrap();
+                                                        let initial = args_iter.next().map(Box::new);
+                                                        return Ok(Expr::ArrayReduce {
+                                                            array: Box::new(extern_ref),
+                                                            callback: Box::new(callback),
+                                                            initial,
+                                                        });
+                                                    }
+                                                }
+                                                _ => {} // Fall through for other methods
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Check for global built-in function calls (parseInt, parseFloat, Number, String, isNaN, isFinite)
                     if let ast::Expr::Ident(ident) = expr.as_ref() {
                         let func_name = ident.sym.as_ref();
@@ -6333,6 +6470,35 @@ fn lower_var_decl_with_destructuring(
                         };
                         if let Some(module) = module_name {
                             ctx.register_native_instance(name.clone(), module.to_string(), class_name.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Check if this is an awaited native class instantiation (e.g., await new Redis())
+            if let Some(init_expr) = &decl.init {
+                if let ast::Expr::Await(await_expr) = init_expr.as_ref() {
+                    if let ast::Expr::New(new_expr) = await_expr.arg.as_ref() {
+                        if let ast::Expr::Ident(class_ident) = new_expr.callee.as_ref() {
+                            let class_name = class_ident.sym.as_ref();
+                            // Map class names to their modules
+                            let module_name = match class_name {
+                                "EventEmitter" => Some("events"),
+                                "WebSocket" => Some("ws"),
+                                "Redis" => Some("ioredis"),
+                                "LRUCache" => Some("lru-cache"),
+                                "Command" => Some("commander"),
+                                "Big" => Some("big.js"),
+                                "Decimal" => Some("decimal.js"),
+                                "BigNumber" => Some("bignumber.js"),
+                                // Database clients
+                                "Pool" => Some("pg"),  // PostgreSQL connection pool
+                                "Client" => Some("pg"), // PostgreSQL client
+                                _ => None,
+                            };
+                            if let Some(module) = module_name {
+                                ctx.register_native_instance(name.clone(), module.to_string(), class_name.to_string());
+                            }
                         }
                     }
                 }

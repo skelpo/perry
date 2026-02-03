@@ -696,10 +696,15 @@ mod tests {
         assert_eq!(js_array_length(arr), 3);
 
         // Get the string pointers from the array and verify their contents
+        // Note: split() stores NaN-boxed string pointers with STRING_TAG
+        const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
+        const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
         unsafe {
-            let ptr0 = js_array_get_f64(arr, 0).to_bits() as *const StringHeader;
-            let ptr1 = js_array_get_f64(arr, 1).to_bits() as *const StringHeader;
-            let ptr2 = js_array_get_f64(arr, 2).to_bits() as *const StringHeader;
+            // Extract pointer from NaN-boxed value by masking off STRING_TAG
+            let ptr0 = (js_array_get_f64(arr, 0).to_bits() & POINTER_MASK) as *const StringHeader;
+            let ptr1 = (js_array_get_f64(arr, 1).to_bits() & POINTER_MASK) as *const StringHeader;
+            let ptr2 = (js_array_get_f64(arr, 2).to_bits() & POINTER_MASK) as *const StringHeader;
 
             assert_eq!(string_as_str(ptr0), "a");
             assert_eq!(string_as_str(ptr1), "b");

@@ -34,5 +34,8 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# Regex for CommonJS parsing
+regex = "1"
+
 [features]
 default = []

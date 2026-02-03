@@ -1,12 +1,20 @@
 //! MySQL connection pool implementation
 
+use std::time::Duration;
+
 use perry_runtime::{js_array_get_jsvalue, js_array_length, js_promise_new, JSValue, Promise};
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
-use sqlx::Row;
 
 use crate::common::{register_handle, Handle};
-use super::result::rows_to_result_tuple;
+use super::result::RawQueryResult;
 use super::types::parse_mysql_config;
+
+/// Default timeout for acquiring a connection from the pool (in seconds)
+const DEFAULT_ACQUIRE_TIMEOUT_SECS: u64 = 10;
+/// Default timeout for connecting to the database (in seconds)
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Default timeout for overall query operation (in seconds)
+const DEFAULT_QUERY_TIMEOUT_SECS: u64 = 30;
 
 /// Wrapper around MySqlPool
 pub struct MysqlPoolHandle {
@@ -37,6 +45,8 @@ pub unsafe extern "C" fn js_mysql2_create_pool(config: JSValue) -> Handle {
 
     let pool = MySqlPoolOptions::new()
         .max_connections(10)
+        // Set timeouts to prevent indefinite hangs when MySQL is unavailable
+        .acquire_timeout(Duration::from_secs(DEFAULT_ACQUIRE_TIMEOUT_SECS))
         .connect_lazy(&url);
 
     match pool {
@@ -54,10 +64,17 @@ pub unsafe extern "C" fn js_mysql2_pool_end(pool_handle: Handle) -> *mut Promise
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         use crate::common::take_handle;
+        use tokio::time::timeout;
 
         if let Some(wrapper) = take_handle::<MysqlPoolHandle>(pool_handle) {
-            wrapper.pool.close().await;
-            Ok(JSValue::undefined().bits())
+            // Wrap pool close in a timeout (use shorter timeout since close should be fast)
+            match timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS), wrapper.pool.close()).await {
+                Ok(()) => Ok(JSValue::undefined().bits()),
+                Err(_) => {
+                    // Pool close timed out, but we've already taken the handle so just return
+                    Ok(JSValue::undefined().bits())
+                }
+            }
         } else {
             Err("Invalid pool handle".to_string())
         }
@@ -87,28 +104,38 @@ pub unsafe extern "C" fn js_mysql2_pool_query(
         String::from_utf8_lossy(bytes).to_string()
     };
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
-        use crate::common::get_handle;
+    // Use spawn_for_promise_deferred to safely create JSValues on the main thread
+    // The async block returns raw Rust data, and the converter creates JSValues
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            use crate::common::get_handle;
+            use tokio::time::timeout;
 
-        if let Some(wrapper) = get_handle::<MysqlPoolHandle>(pool_handle) {
-            match sqlx::query(&sql).fetch_all(&wrapper.pool).await {
-                Ok(rows) => {
-                    // Get column info from first row (if any)
-                    let columns: Vec<_> = if !rows.is_empty() {
-                        rows[0].columns().to_vec()
-                    } else {
-                        Vec::new()
-                    };
-
-                    let result = rows_to_result_tuple(rows, &columns);
-                    Ok(result.bits())
+            if let Some(wrapper) = get_handle::<MysqlPoolHandle>(pool_handle) {
+                // Wrap the query in a timeout to prevent indefinite hangs
+                let query_future = sqlx::query(&sql).fetch_all(&wrapper.pool);
+                match timeout(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS), query_future).await {
+                    Ok(Ok(rows)) => {
+                        // Extract raw data on worker thread (no JSValue allocation)
+                        let raw_result = RawQueryResult::from_mysql_rows(rows);
+                        Ok(raw_result)
+                    }
+                    Ok(Err(e)) => Err(format!("Query failed: {}", e)),
+                    Err(_) => Err(format!(
+                        "Query timed out after {} seconds (MySQL server may be unavailable)",
+                        DEFAULT_QUERY_TIMEOUT_SECS
+                    )),
                 }
-                Err(e) => Err(format!("Query failed: {}", e)),
+            } else {
+                Err("Invalid pool handle".to_string())
             }
-        } else {
-            Err("Invalid pool handle".to_string())
-        }
-    });
+        },
+        // Converter runs on main thread - safe to create JSValues here
+        |raw_result: RawQueryResult| {
+            raw_result.to_jsvalue().bits()
+        },
+    );
 
     promise
 }
@@ -138,41 +165,50 @@ pub unsafe extern "C" fn js_mysql2_pool_execute(
     // Extract parameters from the JSValue array
     let param_values = extract_params_from_jsvalue(params);
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
-        use crate::common::get_handle;
+    // Use spawn_for_promise_deferred to safely create JSValues on the main thread
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            use crate::common::get_handle;
+            use tokio::time::timeout;
 
-        if let Some(wrapper) = get_handle::<MysqlPoolHandle>(pool_handle) {
-            // Build the query with parameter bindings
-            let mut query = sqlx::query(&sql);
+            if let Some(wrapper) = get_handle::<MysqlPoolHandle>(pool_handle) {
+                // Build the query with parameter bindings
+                let mut query = sqlx::query(&sql);
 
-            for param in &param_values {
-                query = match param {
-                    ParamValue::Null => query.bind(Option::<String>::None),
-                    ParamValue::String(s) => query.bind(s.clone()),
-                    ParamValue::Number(n) => query.bind(*n),
-                    ParamValue::Int(i) => query.bind(*i),
-                    ParamValue::Bool(b) => query.bind(*b),
-                };
-            }
-
-            match query.fetch_all(&wrapper.pool).await {
-                Ok(rows) => {
-                    // Get column info from first row (if any)
-                    let columns: Vec<_> = if !rows.is_empty() {
-                        rows[0].columns().to_vec()
-                    } else {
-                        Vec::new()
+                for param in &param_values {
+                    query = match param {
+                        ParamValue::Null => query.bind(Option::<String>::None),
+                        ParamValue::String(s) => query.bind(s.clone()),
+                        ParamValue::Number(n) => query.bind(*n),
+                        ParamValue::Int(i) => query.bind(*i),
+                        ParamValue::Bool(b) => query.bind(*b),
                     };
-
-                    let result = rows_to_result_tuple(rows, &columns);
-                    Ok(result.bits())
                 }
-                Err(e) => Err(format!("Query failed: {}", e)),
+
+                // Wrap the query in a timeout to prevent indefinite hangs
+                let query_future = query.fetch_all(&wrapper.pool);
+                match timeout(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS), query_future).await {
+                    Ok(Ok(rows)) => {
+                        // Extract raw data on worker thread (no JSValue allocation)
+                        let raw_result = RawQueryResult::from_mysql_rows(rows);
+                        Ok(raw_result)
+                    }
+                    Ok(Err(e)) => Err(format!("Query failed: {}", e)),
+                    Err(_) => Err(format!(
+                        "Query timed out after {} seconds (MySQL server may be unavailable)",
+                        DEFAULT_QUERY_TIMEOUT_SECS
+                    )),
+                }
+            } else {
+                Err("Invalid pool handle".to_string())
             }
-        } else {
-            Err("Invalid pool handle".to_string())
-        }
-    });
+        },
+        // Converter runs on main thread - safe to create JSValues here
+        |raw_result: RawQueryResult| {
+            raw_result.to_jsvalue().bits()
+        },
+    );
 
     promise
 }

@@ -68,12 +68,38 @@ pub unsafe extern "C" fn js_load_module(
         Err(_) => return 0,
     };
 
-    let path = PathBuf::from(path_str);
-    let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
+    // Use the NodeModuleLoader to resolve bare module specifiers (like "ethers")
+    use deno_core::ModuleLoader;
+    let loader = crate::modules::NodeModuleLoader::new();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // Try to resolve the module path
+    let resolved_path: PathBuf = if path_str.starts_with("./") || path_str.starts_with("../") || path_str.starts_with('/') {
+        // Relative or absolute path - resolve directly
+        let path = PathBuf::from(path_str);
+        std::fs::canonicalize(&path).unwrap_or(path)
+    } else {
+        // Bare module specifier (like "ethers") - use node_modules resolution
+        let referrer = format!("file://{}/index.js", cwd.display());
+        match loader.resolve(path_str, &referrer, deno_core::ResolutionKind::Import) {
+            Ok(specifier) => {
+                specifier.to_file_path().unwrap_or_else(|_| PathBuf::from(path_str))
+            }
+            Err(e) => {
+                log::error!("Failed to resolve module '{}': {}", path_str, e);
+                return 0;
+            }
+        }
+    };
+
+    let canonical = resolved_path.clone();
 
     let specifier = match deno_core::ModuleSpecifier::from_file_path(&canonical) {
         Ok(s) => s,
-        Err(_) => return 0,
+        Err(_) => {
+            log::error!("Failed to create module specifier from path: {:?}", canonical);
+            return 0;
+        }
     };
 
     let tokio_rt = get_tokio_runtime();

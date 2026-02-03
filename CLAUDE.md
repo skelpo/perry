@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.63
+**Current Version:** 0.2.67
 
 ## Workflow Requirements
 
@@ -205,9 +205,43 @@ To test a feature, compile and run:
 cargo run --release -- test_factorial.ts && ./test_factorial
 ```
 
-## Recent Fixes (v0.2.37-0.2.63)
+## Recent Fixes (v0.2.37-0.2.67)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.67
+- Fix native instance method calls returning 0 when instance is awaited
+  - `await new Redis()`, `await new WebSocket()`, etc. now properly register native instances
+  - HIR lowering now handles `ast::Expr::Await(ast::Expr::New(...))` pattern
+  - Methods like `redis.set()`, `redis.get()` now correctly call the native FFI functions
+  - Added handling in both exported variable declarations and local variable declarations
+
+### v0.2.66
+- Fix await not propagating promise rejections (SIGSEGV crash)
+  - Added `js_promise_reason()` runtime function to get rejection reason
+  - Updated await codegen to check if promise was rejected and throw the rejection reason
+  - Await now properly handles both I64 (raw pointer) and F64 (NaN-boxed) promise values
+  - Functions returning `Promise<T>` type now work correctly with await rejection handling
+
+### v0.2.65
+- Fix async error strings using wrong NaN-box tag (POINTER_TAG instead of STRING_TAG)
+  - Error messages from async operations (mysql2, redis, fetch, etc.) now use `JSValue::string_ptr()`
+    instead of `JSValue::pointer()` for proper type identification
+  - Fixed in spawn_for_promise, spawn_for_promise_deferred, and create_error_value
+- This fixes crashes when error messages were being printed or handled as object pointers
+
+### v0.2.64
+- Fix JS runtime BigInt conversion - V8 BigInt values now properly converted to native Perry BigInt
+  - Added BigInt handling in `v8_to_native()` to convert V8 BigInt to native BigIntHeader
+  - Added BigInt handling in `native_to_v8()` to convert native BigInt back to V8
+  - Uses BIGINT_TAG (0x7FFA) for NaN-boxing BigInt pointers
+- Fix JS runtime module loading for bare module specifiers (e.g., "ethers", "@noble/hashes")
+  - `js_load_module` now properly resolves bare module names using node_modules resolution
+  - Added NodeModuleLoader integration for consistent module resolution
+- Add Node.js built-in module stubs for JS runtime compatibility
+  - Stub implementations for: net, tls, http, https, crypto, fs, path, os, stream, buffer,
+    util, events, assert, url, querystring, string_decoder, zlib
+  - Note: Ethers.js still requires CommonJS require() support which is partially implemented
 
 ### v0.2.63
 - Fix Cranelift verifier type mismatch errors when passing string/pointer values to certain functions

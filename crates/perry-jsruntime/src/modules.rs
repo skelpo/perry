@@ -89,6 +89,25 @@ impl NodeModuleLoader {
         Err(anyhow!("Cannot resolve module: {:?}", base))
     }
 
+    /// Check if a specifier is a Node.js built-in module
+    fn is_node_builtin(specifier: &str) -> bool {
+        matches!(
+            specifier,
+            "net" | "tls" | "http" | "https" | "fs" | "path" | "os" | "crypto"
+            | "stream" | "buffer" | "util" | "events" | "assert" | "child_process"
+            | "dns" | "dgram" | "url" | "querystring" | "string_decoder" | "zlib"
+            | "readline" | "tty" | "vm" | "worker_threads" | "cluster" | "async_hooks"
+            | "perf_hooks" | "trace_events" | "inspector" | "v8"
+            | "node:net" | "node:tls" | "node:http" | "node:https" | "node:fs"
+            | "node:path" | "node:os" | "node:crypto" | "node:stream" | "node:buffer"
+            | "node:util" | "node:events" | "node:assert" | "node:child_process"
+            | "node:dns" | "node:dgram" | "node:url" | "node:querystring"
+            | "node:string_decoder" | "node:zlib" | "node:readline" | "node:tty"
+            | "node:vm" | "node:worker_threads" | "node:cluster" | "node:async_hooks"
+            | "node:perf_hooks" | "node:trace_events" | "node:inspector" | "node:v8"
+        )
+    }
+
     /// Resolve a module from node_modules
     fn resolve_from_node_modules(&self, specifier: &str, referrer: &Path) -> Result<PathBuf> {
         let mut current_dir = referrer.parent().unwrap_or(&self.base_dir).to_path_buf();
@@ -220,8 +239,18 @@ impl ModuleLoader for NodeModuleLoader {
         referrer: &str,
         _kind: ResolutionKind,
     ) -> Result<ModuleSpecifier, AnyError> {
+        // Handle Node.js built-in modules with a special URL scheme
+        if Self::is_node_builtin(specifier) {
+            let builtin_name = specifier.strip_prefix("node:").unwrap_or(specifier);
+            // Use a special URL scheme for built-ins so we can intercept them in load()
+            return Ok(ModuleSpecifier::parse(&format!("node:{}", builtin_name))?);
+        }
+
         let referrer_path = if referrer.starts_with("file://") {
             PathBuf::from(referrer.strip_prefix("file://").unwrap_or(referrer))
+        } else if referrer.starts_with("node:") {
+            // If referrer is a built-in, use current directory
+            self.base_dir.join("index.js")
         } else {
             PathBuf::from(referrer)
         };
@@ -242,6 +271,18 @@ impl ModuleLoader for NodeModuleLoader {
         _is_dyn_import: bool,
         _requested_module_type: RequestedModuleType,
     ) -> ModuleLoadResponse {
+        // Handle Node.js built-in modules with stubs
+        if module_specifier.scheme() == "node" {
+            let builtin_name = module_specifier.path();
+            let stub_code = get_builtin_stub(builtin_name);
+            return ModuleLoadResponse::Sync(Ok(ModuleSource::new(
+                ModuleType::JavaScript,
+                ModuleSourceCode::String(stub_code.into()),
+                module_specifier,
+                None,
+            )));
+        }
+
         let path = match module_specifier.to_file_path() {
             Ok(p) => p,
             Err(_) => return ModuleLoadResponse::Sync(Err(anyhow!("Invalid file path").into())),
@@ -335,22 +376,313 @@ fn is_commonjs(code: &str) -> bool {
 
 /// Wrap CommonJS code as ESM
 fn wrap_commonjs(code: &str) -> String {
+    // Extract exported names from CommonJS code to properly re-export them
+    let mut named_exports = Vec::new();
+
+    // Find exports.X = assignments
+    for cap in regex::Regex::new(r"exports\.(\w+)\s*=").unwrap().captures_iter(code) {
+        if let Some(name) = cap.get(1) {
+            let name = name.as_str();
+            if name != "__esModule" && !named_exports.contains(&name.to_string()) {
+                named_exports.push(name.to_string());
+            }
+        }
+    }
+
+    // Use a more sophisticated approach: wrap the code in an IIFE and then export
+    // the results using dynamic re-exports
+    let named_export_decls = if named_exports.is_empty() {
+        String::new()
+    } else {
+        // Create individual export statements that reference the _cjs object
+        named_exports.iter()
+            .map(|n| format!("export const {} = _cjs.{};", n, n))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
     format!(
         r#"
-const module = {{ exports: {{}} }};
-const exports = module.exports;
-function require(specifier) {{
-    throw new Error('require() is not supported. Use ESM imports instead.');
-}}
+const _cjs = (function() {{
+    const module = {{ exports: {{}} }};
+    const exports = module.exports;
+    function require(specifier) {{
+        throw new Error('require() is not supported. Use ESM imports instead: ' + specifier);
+    }}
 
+    {}
+
+    return module.exports;
+}})();
+
+export default _cjs;
 {}
-
-export default module.exports;
-const __exports = module.exports;
-export {{ __exports as exports }};
 "#,
-        code
+        code, named_export_decls
     )
+}
+
+/// Get a stub implementation for a Node.js built-in module
+fn get_builtin_stub(name: &str) -> String {
+    match name {
+        "net" => r#"
+// Stub implementation for Node.js 'net' module
+export class Socket {
+    constructor() {}
+    connect() { return this; }
+    write() { return true; }
+    end() {}
+    destroy() {}
+    on() { return this; }
+    once() { return this; }
+    removeListener() { return this; }
+    setTimeout() { return this; }
+    setNoDelay() { return this; }
+    setKeepAlive() { return this; }
+}
+export class Server {
+    constructor() {}
+    listen() { return this; }
+    close() {}
+    on() { return this; }
+}
+export function createServer() { return new Server(); }
+export function createConnection() { return new Socket(); }
+export function connect() { return new Socket(); }
+export function isIP() { return 0; }
+export function isIPv4() { return false; }
+export function isIPv6() { return false; }
+export default { Socket, Server, createServer, createConnection, connect, isIP, isIPv4, isIPv6 };
+"#.to_string(),
+        "tls" => r#"
+// Stub implementation for Node.js 'tls' module
+export class TLSSocket {
+    constructor() {}
+    connect() { return this; }
+    on() { return this; }
+}
+export function connect() { return new TLSSocket(); }
+export function createSecureContext() { return {}; }
+export default { TLSSocket, connect, createSecureContext };
+"#.to_string(),
+        "http" | "https" => r#"
+// Stub implementation for Node.js http/https module
+export class IncomingMessage {}
+export class ServerResponse {}
+export class Agent {}
+export function request() { throw new Error('http.request not supported in this environment'); }
+export function get() { throw new Error('http.get not supported in this environment'); }
+export function createServer() { throw new Error('http.createServer not supported in this environment'); }
+export default { IncomingMessage, ServerResponse, Agent, request, get, createServer };
+"#.to_string(),
+        "crypto" => r#"
+// Stub implementation for Node.js 'crypto' module
+export function randomBytes(size) {
+    const arr = new Uint8Array(size);
+    crypto.getRandomValues(arr);
+    return arr;
+}
+export function createHash(algorithm) {
+    return {
+        update(data) { this._data = (this._data || '') + data; return this; },
+        digest(encoding) { return ''; }
+    };
+}
+export function createHmac(algorithm, key) {
+    return {
+        update(data) { return this; },
+        digest(encoding) { return ''; }
+    };
+}
+export function pbkdf2Sync() { return new Uint8Array(32); }
+export function pbkdf2() { return Promise.resolve(new Uint8Array(32)); }
+export default { randomBytes, createHash, createHmac, pbkdf2Sync, pbkdf2 };
+"#.to_string(),
+        "fs" => r#"
+// Stub implementation for Node.js 'fs' module
+export function readFileSync() { throw new Error('fs.readFileSync not supported'); }
+export function writeFileSync() { throw new Error('fs.writeFileSync not supported'); }
+export function existsSync() { return false; }
+export function mkdirSync() {}
+export function readdirSync() { return []; }
+export function statSync() { throw new Error('fs.statSync not supported'); }
+export const promises = {
+    readFile: async () => { throw new Error('fs.promises.readFile not supported'); },
+    writeFile: async () => { throw new Error('fs.promises.writeFile not supported'); },
+};
+export default { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, promises };
+"#.to_string(),
+        "path" => r#"
+// Stub implementation for Node.js 'path' module
+export const sep = '/';
+export const delimiter = ':';
+export function join(...parts) { return parts.join('/').replace(/\/+/g, '/'); }
+export function resolve(...parts) { return '/' + parts.join('/').replace(/\/+/g, '/'); }
+export function dirname(p) { return p.split('/').slice(0, -1).join('/') || '/'; }
+export function basename(p, ext) {
+    let base = p.split('/').pop() || '';
+    if (ext && base.endsWith(ext)) base = base.slice(0, -ext.length);
+    return base;
+}
+export function extname(p) { const m = p.match(/\.[^.]+$/); return m ? m[0] : ''; }
+export function isAbsolute(p) { return p.startsWith('/'); }
+export function normalize(p) { return p.replace(/\/+/g, '/'); }
+export function relative(from, to) { return to; }
+export function parse(p) { return { root: '/', dir: dirname(p), base: basename(p), ext: extname(p), name: basename(p, extname(p)) }; }
+export function format(obj) { return (obj.dir || '') + '/' + (obj.base || obj.name + obj.ext); }
+export default { sep, delimiter, join, resolve, dirname, basename, extname, isAbsolute, normalize, relative, parse, format };
+"#.to_string(),
+        "os" => r#"
+// Stub implementation for Node.js 'os' module
+export function platform() { return 'unknown'; }
+export function arch() { return 'unknown'; }
+export function cpus() { return []; }
+export function homedir() { return '/'; }
+export function tmpdir() { return '/tmp'; }
+export function hostname() { return 'localhost'; }
+export function type() { return 'Unknown'; }
+export function release() { return '0.0.0'; }
+export function totalmem() { return 0; }
+export function freemem() { return 0; }
+export function uptime() { return 0; }
+export function loadavg() { return [0, 0, 0]; }
+export function networkInterfaces() { return {}; }
+export const EOL = '\n';
+export default { platform, arch, cpus, homedir, tmpdir, hostname, type, release, totalmem, freemem, uptime, loadavg, networkInterfaces, EOL };
+"#.to_string(),
+        "stream" => r#"
+// Stub implementation for Node.js 'stream' module
+export class Readable {
+    constructor() {}
+    read() { return null; }
+    on() { return this; }
+    pipe() { return this; }
+}
+export class Writable {
+    constructor() {}
+    write() { return true; }
+    end() {}
+    on() { return this; }
+}
+export class Duplex extends Readable {
+    write() { return true; }
+    end() {}
+}
+export class Transform extends Duplex {}
+export class PassThrough extends Transform {}
+export function pipeline() {}
+export function finished() {}
+export default { Readable, Writable, Duplex, Transform, PassThrough, pipeline, finished };
+"#.to_string(),
+        "buffer" => r#"
+// Stub implementation for Node.js 'buffer' module
+export const Buffer = globalThis.Buffer || {
+    from: (data, encoding) => new Uint8Array(typeof data === 'string' ? new TextEncoder().encode(data) : data),
+    alloc: (size) => new Uint8Array(size),
+    allocUnsafe: (size) => new Uint8Array(size),
+    isBuffer: (obj) => obj instanceof Uint8Array,
+    concat: (list) => {
+        const total = list.reduce((acc, arr) => acc + arr.length, 0);
+        const result = new Uint8Array(total);
+        let offset = 0;
+        for (const arr of list) { result.set(arr, offset); offset += arr.length; }
+        return result;
+    },
+};
+export default { Buffer };
+"#.to_string(),
+        "util" => r#"
+// Stub implementation for Node.js 'util' module
+export function promisify(fn) { return (...args) => new Promise((resolve, reject) => fn(...args, (err, result) => err ? reject(err) : resolve(result))); }
+export function callbackify(fn) { return (...args) => { const cb = args.pop(); fn(...args).then(r => cb(null, r)).catch(cb); }; }
+export function inspect(obj) { return JSON.stringify(obj); }
+export function format(fmt, ...args) { return fmt; }
+export function debuglog() { return () => {}; }
+export function deprecate(fn) { return fn; }
+export function inherits(ctor, superCtor) { Object.setPrototypeOf(ctor.prototype, superCtor.prototype); }
+export const TextEncoder = globalThis.TextEncoder;
+export const TextDecoder = globalThis.TextDecoder;
+export default { promisify, callbackify, inspect, format, debuglog, deprecate, inherits, TextEncoder, TextDecoder };
+"#.to_string(),
+        "events" => r#"
+// Stub implementation for Node.js 'events' module
+export class EventEmitter {
+    constructor() { this._events = {}; }
+    on(event, listener) { (this._events[event] = this._events[event] || []).push(listener); return this; }
+    once(event, listener) { const wrapped = (...args) => { this.off(event, wrapped); listener(...args); }; return this.on(event, wrapped); }
+    off(event, listener) { const arr = this._events[event]; if (arr) { const i = arr.indexOf(listener); if (i >= 0) arr.splice(i, 1); } return this; }
+    removeListener(event, listener) { return this.off(event, listener); }
+    emit(event, ...args) { const arr = this._events[event]; if (arr) arr.forEach(fn => fn(...args)); return !!arr; }
+    removeAllListeners(event) { if (event) delete this._events[event]; else this._events = {}; return this; }
+    listeners(event) { return this._events[event] || []; }
+    listenerCount(event) { return (this._events[event] || []).length; }
+    setMaxListeners() { return this; }
+    getMaxListeners() { return 10; }
+}
+export default EventEmitter;
+"#.to_string(),
+        "assert" => r#"
+// Stub implementation for Node.js 'assert' module
+export function ok(value, message) { if (!value) throw new Error(message || 'Assertion failed'); }
+export function strictEqual(a, b, message) { if (a !== b) throw new Error(message || 'Assertion failed'); }
+export function deepStrictEqual(a, b, message) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(message || 'Assertion failed'); }
+export function notStrictEqual(a, b, message) { if (a === b) throw new Error(message || 'Assertion failed'); }
+export function throws(fn, message) { try { fn(); throw new Error(message || 'Expected function to throw'); } catch (e) {} }
+export function doesNotThrow(fn, message) { try { fn(); } catch (e) { throw new Error(message || 'Expected function not to throw'); } }
+export function rejects(fn, message) { return fn().then(() => { throw new Error(message || 'Expected promise to reject'); }).catch(() => {}); }
+export default { ok, strictEqual, deepStrictEqual, notStrictEqual, throws, doesNotThrow, rejects };
+"#.to_string(),
+        "url" => r#"
+// Stub implementation for Node.js 'url' module
+export const URL = globalThis.URL;
+export const URLSearchParams = globalThis.URLSearchParams;
+export function parse(urlString) { const u = new URL(urlString, 'http://localhost'); return { protocol: u.protocol, host: u.host, hostname: u.hostname, port: u.port, pathname: u.pathname, search: u.search, hash: u.hash, href: u.href }; }
+export function format(urlObj) { return urlObj.href || ''; }
+export function resolve(from, to) { return new URL(to, from).href; }
+export default { URL, URLSearchParams, parse, format, resolve };
+"#.to_string(),
+        "querystring" => r#"
+// Stub implementation for Node.js 'querystring' module
+export function stringify(obj) { return new URLSearchParams(obj).toString(); }
+export function parse(str) { const params = new URLSearchParams(str); const obj = {}; for (const [k, v] of params) obj[k] = v; return obj; }
+export function escape(str) { return encodeURIComponent(str); }
+export function unescape(str) { return decodeURIComponent(str); }
+export default { stringify, parse, escape, unescape };
+"#.to_string(),
+        "string_decoder" => r#"
+// Stub implementation for Node.js 'string_decoder' module
+export class StringDecoder {
+    constructor(encoding) { this.encoding = encoding || 'utf8'; }
+    write(buffer) { return new TextDecoder(this.encoding).decode(buffer); }
+    end(buffer) { return buffer ? this.write(buffer) : ''; }
+}
+export default { StringDecoder };
+"#.to_string(),
+        "zlib" => r#"
+// Stub implementation for Node.js 'zlib' module
+export function gzip() { throw new Error('zlib.gzip not supported'); }
+export function gunzip() { throw new Error('zlib.gunzip not supported'); }
+export function gzipSync() { throw new Error('zlib.gzipSync not supported'); }
+export function gunzipSync(data) { throw new Error('zlib.gunzipSync not supported'); }
+export function deflate() { throw new Error('zlib.deflate not supported'); }
+export function inflate() { throw new Error('zlib.inflate not supported'); }
+export function deflateSync() { throw new Error('zlib.deflateSync not supported'); }
+export function inflateSync() { throw new Error('zlib.inflateSync not supported'); }
+export function brotliCompress() { throw new Error('zlib.brotliCompress not supported'); }
+export function brotliDecompress() { throw new Error('zlib.brotliDecompress not supported'); }
+export function brotliCompressSync() { throw new Error('zlib.brotliCompressSync not supported'); }
+export function brotliDecompressSync() { throw new Error('zlib.brotliDecompressSync not supported'); }
+export function createGzip() { throw new Error('zlib.createGzip not supported'); }
+export function createGunzip() { throw new Error('zlib.createGunzip not supported'); }
+export function createDeflate() { throw new Error('zlib.createDeflate not supported'); }
+export function createInflate() { throw new Error('zlib.createInflate not supported'); }
+export default { gzip, gunzip, gzipSync, gunzipSync, deflate, inflate, deflateSync, inflateSync, brotliCompress, brotliDecompress, brotliCompressSync, brotliDecompressSync, createGzip, createGunzip, createDeflate, createInflate };
+"#.to_string(),
+        _ => format!(r#"
+// Empty stub for unsupported Node.js built-in: {}
+export default {{}};
+"#, name),
+    }
 }
 
 #[cfg(test)]
