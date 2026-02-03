@@ -25549,10 +25549,14 @@ fn compile_expr(
             // Compile the string argument
             let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, string, this_ctx)?;
 
-            // Get the string pointer (i64)
+            // Get the string pointer (i64) - extract from NaN-boxed value if needed
             let str_ptr = if builder.func.dfg.value_type(str_val) == types::F64 {
-                // NaN-boxed string pointer - extract it
-                builder.ins().bitcast(types::I64, MemFlags::new(), str_val)
+                // NaN-boxed string pointer - use unified extraction function
+                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                let call = builder.ins().call(get_str_ref, &[str_val]);
+                builder.inst_results(call)[0]
             } else {
                 str_val
             };
@@ -25575,9 +25579,14 @@ fn compile_expr(
             // Compile the string argument
             let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, string, this_ctx)?;
 
-            // Get the string pointer (i64)
+            // Get the string pointer (i64) - extract from NaN-boxed value if needed
             let str_ptr = if builder.func.dfg.value_type(str_val) == types::F64 {
-                builder.ins().bitcast(types::I64, MemFlags::new(), str_val)
+                // NaN-boxed string pointer - use unified extraction function
+                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                let call = builder.ins().call(get_str_ref, &[str_val]);
+                builder.inst_results(call)[0]
             } else {
                 str_val
             };
