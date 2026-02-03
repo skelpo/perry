@@ -19171,7 +19171,21 @@ fn compile_expr(
                             // Handle bigint method calls
                             if info.is_bigint {
                                 let bigint_val = builder.use_var(info.var);
-                                let bigint_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), bigint_val);
+                                // BigInt may be stored as I64 (raw pointer) or F64 (NaN-boxed)
+                                let bigint_ptr = {
+                                    let val_type = builder.func.dfg.value_type(bigint_val);
+                                    if val_type == types::F64 {
+                                        // NaN-boxed - extract raw pointer
+                                        let get_bigint_func = extern_funcs.get("js_nanbox_get_bigint")
+                                            .ok_or_else(|| anyhow!("js_nanbox_get_bigint not declared"))?;
+                                        let get_bigint_ref = module.declare_func_in_func(*get_bigint_func, builder.func);
+                                        let extract_call = builder.ins().call(get_bigint_ref, &[bigint_val]);
+                                        builder.inst_results(extract_call)[0]
+                                    } else {
+                                        // Already a raw pointer
+                                        bigint_val
+                                    }
+                                };
 
                                 match property.as_str() {
                                     "toString" => {
@@ -19180,7 +19194,12 @@ fn compile_expr(
                                         let func_ref = module.declare_func_in_func(*to_string_func, builder.func);
                                         let call = builder.ins().call(func_ref, &[bigint_ptr]);
                                         let result_ptr = builder.inst_results(call)[0];
-                                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
+                                        // NaN-box the result string with STRING_TAG
+                                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                        let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                                        return Ok(builder.inst_results(nanbox_call)[0]);
                                     }
                                     _ => {}
                                 }
@@ -24977,17 +24996,16 @@ fn compile_expr(
                     // ethers module functions
                     match method.as_str() {
                         "formatUnits" => {
-                            // formatUnits(bigint, decimals) - bigint is i64 pointer, decimals is f64
+                            // formatUnits(bigint, decimals) - bigint is NaN-boxed, decimals is f64
                             let mut args = Vec::new();
                             if !arg_vals.is_empty() {
-                                // BigInt pointer - needs to be i64
-                                let val_type = builder.func.dfg.value_type(arg_vals[0]);
-                                let ptr = if val_type == types::I64 {
-                                    arg_vals[0]
-                                } else {
-                                    builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0])
-                                };
-                                args.push(ptr);
+                                // BigInt is NaN-boxed - extract raw pointer
+                                let bigint_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_bigint_func = extern_funcs.get("js_nanbox_get_bigint")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_bigint not declared"))?;
+                                let get_bigint_ref = module.declare_func_in_func(*get_bigint_func, builder.func);
+                                let call = builder.ins().call(get_bigint_ref, &[bigint_f64]);
+                                args.push(builder.inst_results(call)[0]);
                             }
                             if arg_vals.len() > 1 {
                                 args.push(arg_vals[1]); // decimals as f64
@@ -24997,11 +25015,16 @@ fn compile_expr(
                             args
                         }
                         "parseUnits" => {
-                            // parseUnits(string, decimals) - string is i64 pointer, decimals is f64
+                            // parseUnits(string, decimals) - string is NaN-boxed, decimals is f64
                             let mut args = Vec::new();
                             if !arg_vals.is_empty() {
-                                // String pointer - needs to be i64
-                                args.push(builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]));
+                                // String is NaN-boxed - extract raw pointer
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
                             }
                             if arg_vals.len() > 1 {
                                 args.push(arg_vals[1]); // decimals as f64
@@ -25184,10 +25207,24 @@ fn compile_expr(
                 } else if native_module == "events" && (method == "emit" || method == "listenerCount") {
                     // emit and listenerCount return f64 directly (boolean/number)
                     Ok(result)
+                } else if native_module == "ethers" && method == "formatUnits" {
+                    // formatUnits returns string pointer - NaN-box with STRING_TAG
+                    let nanbox_func = extern_funcs.get("js_nanbox_string")
+                        .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                    let call = builder.ins().call(nanbox_ref, &[result]);
+                    Ok(builder.inst_results(call)[0])
+                } else if native_module == "ethers" && method == "parseUnits" {
+                    // parseUnits returns BigInt pointer - NaN-box with BIGINT_TAG
+                    let nanbox_func = extern_funcs.get("js_nanbox_bigint")
+                        .ok_or_else(|| anyhow!("js_nanbox_bigint not declared"))?;
+                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                    let call = builder.ins().call(nanbox_ref, &[result]);
+                    Ok(builder.inst_results(call)[0])
                 } else if native_module == "mysql2" || native_module == "mysql2/promise" ||
                           native_module == "ioredis" || native_module == "ws" ||
                           native_module == "events" || native_module == "lru-cache" ||
-                          native_module == "commander" || native_module == "ethers" ||
+                          native_module == "commander" ||
                           native_module == "decimal.js" || native_module == "big.js" ||
                           native_module == "bignumber.js" {
                     // These modules return object pointers - NaN-box with POINTER_TAG

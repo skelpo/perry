@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.69
+**Current Version:** 0.2.70
 
 ## Workflow Requirements
 
@@ -205,9 +205,16 @@ To test a feature, compile and run:
 cargo run --release -- test_factorial.ts && ./test_factorial
 ```
 
-## Recent Fixes (v0.2.37-0.2.69)
+## Recent Fixes (v0.2.37-0.2.70)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.70
+- Fix ethers.formatUnits() and ethers.parseUnits() SIGSEGV crash
+  - formatUnits: Extract BigInt from NaN-boxed value using `js_nanbox_get_bigint`
+  - parseUnits: Extract string from NaN-boxed value using `js_get_string_pointer_unified`
+  - formatUnits: NaN-box return string with STRING_TAG
+  - parseUnits: NaN-box return BigInt with BIGINT_TAG
 
 ### v0.2.69
 - Fix parseInt() and parseFloat() SIGSEGV crash
