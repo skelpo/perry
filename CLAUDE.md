@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.51
+**Current Version:** 0.2.59
 
 ## Workflow Requirements
 
@@ -205,9 +205,81 @@ To test a feature, compile and run:
 cargo run --release -- test_factorial.ts && ./test_factorial
 ```
 
-## Recent Fixes (v0.2.37-0.2.51)
+## Recent Fixes (v0.2.37-0.2.59)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.59
+- Fix ethers.js duplicate symbol linker error when using perry-jsruntime
+- Root cause: Both `perry-runtime` and `perry-jsruntime` defined `js_call_method` and `js_call_value`
+  - `perry-runtime/src/object.rs` had `js_call_method` for native closure dispatch
+  - `perry-runtime/src/closure.rs` had `js_call_value` for native closure calls
+  - `perry-jsruntime/src/interop.rs` had the same functions for V8 JavaScript calls
+- When linking with jsruntime (which includes runtime via re-exports), both definitions conflicted
+- Solution: Rename the native closure versions to avoid collision:
+  - `js_call_method` -> `js_native_call_method` in perry-runtime/src/object.rs
+  - `js_call_value` -> `js_native_call_value` in perry-runtime/src/closure.rs
+- The V8 versions in perry-jsruntime keep the original names (used by codegen for JS runtime fallback)
+
+### v0.2.58
+- Fix mysql2 pool.query() and pool.execute() hanging indefinitely
+- Root cause: perry-runtime uses **thread-local arenas** for memory allocation
+- Async database operations run on tokio worker threads, but JSValue allocation happened there
+- Memory allocated on worker threads was invalid/inaccessible from the main thread
+- Solution: Implement deferred JSValue creation with `spawn_for_promise_deferred()`
+  1. Async block extracts raw Rust data on worker thread (no JSValue allocation)
+  2. Raw data is queued with a converter function
+  3. Converter runs on main thread during `js_stdlib_process_pending()`
+  4. JSValues created safely using main thread's arena allocator
+- Added `RawQueryResult`, `RawRowData`, `RawColumnInfo`, `RawValue` types for thread-safe data transfer
+- Updated mysql2 pool.query(), pool.execute(), connection.query() to use deferred conversion
+- Also fixed error string creation in spawn_for_promise - now deferred to main thread
+
+### v0.2.57
+- Fix cross-module array exports returning garbage (e.g., `9222246136947933184` instead of array)
+- Arrays exported from one module and imported in another were not properly NaN-boxed
+- Root causes fixed:
+  1. Export side: NaN-box array pointers with POINTER_TAG when storing to export globals
+  2. Import side: HIR lowering now generates proper array method expressions (ArrayJoin, ArrayMap, etc.) for imported arrays via `ExternFuncRef`
+  3. Codegen: All array methods (join, map, filter, forEach, reduce) now detect `ExternFuncRef` and extract pointer from NaN-boxed value using `js_nanbox_get_pointer`
+  4. PropertyGet: Handle `.length` on `ExternFuncRef` arrays using `js_dynamic_array_length`
+- Test results: `CHAIN_NAMES.join(', ')` now returns `"ethereum, base, bnb"` instead of garbage
+
+### v0.2.56
+- Fix `string.split('').slice(0, 5)` returning empty array
+- Issue: array slice was using `js_string_slice` instead of `js_array_slice` for arrays
+- Root causes fixed:
+  1. Add `split` to methods that return arrays in local variable type inference
+  2. Mark `split()` results as NaN-boxed arrays (`is_pointer = false`, `is_array = true`)
+  3. Add special handling for `.slice()` on arrays to call `js_array_slice`
+  4. Detect array slice for chained calls like `str.split('').slice()` by checking callee method
+  5. Extract array pointer from NaN-boxed value using `js_nanbox_get_pointer` before calling `js_array_slice`
+
+### v0.2.55
+- Implement Promise.all() - takes array of promises, returns promise that resolves with array of results
+- Add `js_promise_all(promises_arr: i64)` runtime function in promise.rs
+- Handles empty arrays (resolves immediately with empty array)
+- Handles mixed promises and non-promise values
+- Properly waits for all promises to resolve before completing
+- Rejects immediately if any promise rejects
+
+### v0.2.54
+- Fix ioredis "Unknown class: Redis" error
+- Add handler for `new Redis(config?)` in Expr::New codegen
+- Register Redis as a native handle class (uses f64, not i64 pointers)
+- `new Redis()` now correctly calls `js_ioredis_new` and returns a Promise
+
+### v0.2.53
+- Fix `array.join()` returning garbage - NaN-box result with STRING_TAG instead of bitcast
+- Fix `string.includes()` and `array.includes()` returning 1/0 instead of true/false
+- Fix Promise unwrapping when async function returns `new Promise(...)`
+- Add `js_promise_resolve_with_promise` runtime function for Promise chaining
+- When async function returns a Promise, outer promise now adopts inner promise's eventual value
+
+### v0.2.52
+- Fix async/await returning garbage data from nested async function calls
+- Await results are already NaN-boxed values, not raw pointers - set `is_pointer = false` to prevent double-boxing
+- Previously, returning an await result would strip STRING_TAG and incorrectly re-box with POINTER_TAG
 
 ### v0.2.51
 - Fix boolean representation - use NaN-boxed TAG_TRUE/TAG_FALSE (0x7FFC_0000_0000_0004/0003) instead of 0.0/1.0
@@ -299,3 +371,11 @@ cargo run --release -- test_factorial.ts && ./test_factorial
 ### Cross-module variable access
 - Module-level strings are F64 (NaN-boxed), not I64 pointers
 - Check `module_level_locals` for proper type info
+
+### Async operations hanging or returning garbage
+- **Root cause**: perry-runtime uses thread-local arenas for memory allocation
+- Async operations (mysql2, pg, etc.) run on tokio worker threads
+- JSValue objects created on worker threads use the wrong arena
+- **Solution**: Use `spawn_for_promise_deferred()` instead of `spawn_for_promise()`
+- Return raw Rust data from async block, convert to JSValue on main thread
+- The converter function runs during `js_stdlib_process_pending()` on main thread

@@ -545,8 +545,11 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
 /// args_ptr: pointer to array of f64 arguments
 /// args_len: number of arguments
 /// Returns the result as f64
+///
+/// NOTE: This function is named js_native_call_method to avoid symbol collision
+/// with js_call_method in perry-jsruntime which handles V8 JavaScript values.
 #[no_mangle]
-pub unsafe extern "C" fn js_call_method(
+pub unsafe extern "C" fn js_native_call_method(
     object: f64,
     method_name_ptr: *const i8,
     method_name_len: usize,
@@ -646,7 +649,7 @@ pub unsafe extern "C" fn js_call_method(
                         if field_val.is_pointer() {
                             // Assume it's a closure and call it
                             let closure = field_val.as_pointer::<crate::closure::ClosureHeader>();
-                            return crate::closure::js_call_value(
+                            return crate::closure::js_native_call_value(
                                 f64::from_bits(field_val.bits()),
                                 args_ptr,
                                 args_len,

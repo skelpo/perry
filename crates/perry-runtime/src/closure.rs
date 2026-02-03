@@ -142,8 +142,11 @@ pub extern "C" fn js_closure_call5(closure: *const ClosureHeader, arg0: f64, arg
 /// args_ptr: pointer to array of f64 arguments
 /// args_len: number of arguments
 /// Returns the result as f64
+///
+/// NOTE: This function is named js_native_call_value to avoid symbol collision
+/// with js_call_value in perry-jsruntime which handles V8 JavaScript values.
 #[no_mangle]
-pub unsafe extern "C" fn js_call_value(
+pub unsafe extern "C" fn js_native_call_value(
     func_value: f64,
     args_ptr: *const f64,
     args_len: usize,
@@ -202,7 +205,7 @@ pub unsafe extern "C" fn js_call_value(
         _ => {
             // For more than 5 arguments, we'd need a more generic approach
             // For now, just call with as many as we can handle
-            eprintln!("Warning: js_call_value called with {} args, only supporting up to 5", args_len);
+            eprintln!("Warning: js_native_call_value called with {} args, only supporting up to 5", args_len);
             let arg0 = if args_ptr.is_null() { 0.0 } else { *args_ptr };
             let arg1 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(1) };
             let arg2 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(2) };
