@@ -8204,6 +8204,329 @@ impl Compiler {
         }
 
         // ============================================
+        // Fastify HTTP Framework FFI functions
+        // ============================================
+
+        // js_fastify_create() -> Handle (i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_fastify_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_create".to_string(), func_id);
+        }
+
+        // js_fastify_create_with_opts(opts: f64) -> Handle (i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // opts object
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_fastify_create_with_opts", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_create_with_opts".to_string(), func_id);
+        }
+
+        // js_fastify_get(app: Handle, path: i64, handler: i64) -> bool (i32)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // app handle
+            sig.params.push(AbiParam::new(types::I64)); // path string
+            sig.params.push(AbiParam::new(types::I64)); // handler closure
+            sig.returns.push(AbiParam::new(types::I32)); // bool
+            let func_id = self.module.declare_function("js_fastify_get", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_get".to_string(), func_id);
+        }
+
+        // js_fastify_post(app: Handle, path: i64, handler: i64) -> bool (i32)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_fastify_post", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_post".to_string(), func_id);
+        }
+
+        // js_fastify_put(app: Handle, path: i64, handler: i64) -> bool (i32)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_fastify_put", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_put".to_string(), func_id);
+        }
+
+        // js_fastify_delete(app: Handle, path: i64, handler: i64) -> bool (i32)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_fastify_delete", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_delete".to_string(), func_id);
+        }
+
+        // js_fastify_patch(app: Handle, path: i64, handler: i64) -> bool (i32)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_fastify_patch", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_patch".to_string(), func_id);
+        }
+
+        // js_fastify_head(app: Handle, path: i64, handler: i64) -> bool (i32)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_fastify_head", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_head".to_string(), func_id);
+        }
+
+        // js_fastify_options(app: Handle, path: i64, handler: i64) -> bool (i32)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_fastify_options", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_options".to_string(), func_id);
+        }
+
+        // js_fastify_all(app: Handle, path: i64, handler: i64) -> bool (i32)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_fastify_all", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_all".to_string(), func_id);
+        }
+
+        // js_fastify_route(app: Handle, method: i64, path: i64, handler: i64) -> bool (i32)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_fastify_route", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_route".to_string(), func_id);
+        }
+
+        // js_fastify_add_hook(app: Handle, hook_name: i64, handler: i64) -> bool (i32)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_fastify_add_hook", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_add_hook".to_string(), func_id);
+        }
+
+        // js_fastify_set_error_handler(app: Handle, handler: i64) -> bool (i32)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_fastify_set_error_handler", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_set_error_handler".to_string(), func_id);
+        }
+
+        // js_fastify_register(app: Handle, plugin: i64, opts: f64) -> bool (i32)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // app handle
+            sig.params.push(AbiParam::new(types::I64)); // plugin closure
+            sig.params.push(AbiParam::new(types::F64)); // opts object
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_fastify_register", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_register".to_string(), func_id);
+        }
+
+        // js_fastify_listen(app: Handle, opts: f64, callback: i64) -> void
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // app handle
+            sig.params.push(AbiParam::new(types::F64)); // opts object (contains port)
+            sig.params.push(AbiParam::new(types::I64)); // callback closure
+            let func_id = self.module.declare_function("js_fastify_listen", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_listen".to_string(), func_id);
+        }
+
+        // ---- Context/Request/Reply methods ----
+
+        // js_fastify_req_method(ctx: Handle) -> i64 (string pointer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_fastify_req_method", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_req_method".to_string(), func_id);
+        }
+
+        // js_fastify_req_url(ctx: Handle) -> i64 (string pointer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_fastify_req_url", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_req_url".to_string(), func_id);
+        }
+
+        // js_fastify_req_params(ctx: Handle) -> i64 (string pointer - JSON)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_fastify_req_params", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_req_params".to_string(), func_id);
+        }
+
+        // js_fastify_req_param(ctx: Handle, name: i64) -> i64 (string pointer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_fastify_req_param", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_req_param".to_string(), func_id);
+        }
+
+        // js_fastify_req_query(ctx: Handle) -> i64 (string pointer - JSON)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_fastify_req_query", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_req_query".to_string(), func_id);
+        }
+
+        // js_fastify_req_body(ctx: Handle) -> i64 (string pointer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_fastify_req_body", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_req_body".to_string(), func_id);
+        }
+
+        // js_fastify_req_json(ctx: Handle) -> f64 (NaN-boxed object)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_fastify_req_json", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_req_json".to_string(), func_id);
+        }
+
+        // js_fastify_req_headers(ctx: Handle) -> i64 (string pointer - JSON)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_fastify_req_headers", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_req_headers".to_string(), func_id);
+        }
+
+        // js_fastify_req_header(ctx: Handle, name: i64) -> i64 (string pointer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_fastify_req_header", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_req_header".to_string(), func_id);
+        }
+
+        // js_fastify_reply_status(ctx: Handle, code: f64) -> i64 (handle - chainable)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_fastify_reply_status", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_reply_status".to_string(), func_id);
+        }
+
+        // js_fastify_reply_header(ctx: Handle, name: i64, value: i64) -> i64 (handle - chainable)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_fastify_reply_header", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_reply_header".to_string(), func_id);
+        }
+
+        // js_fastify_reply_send(ctx: Handle, data: f64) -> i32 (bool)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_fastify_reply_send", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_reply_send".to_string(), func_id);
+        }
+
+        // js_fastify_ctx_json(ctx: Handle, data: f64, status: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_fastify_ctx_json", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_ctx_json".to_string(), func_id);
+        }
+
+        // js_fastify_ctx_text(ctx: Handle, text: i64, status: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_fastify_ctx_text", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_ctx_text".to_string(), func_id);
+        }
+
+        // js_fastify_ctx_html(ctx: Handle, html: i64, status: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_fastify_ctx_html", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_ctx_html".to_string(), func_id);
+        }
+
+        // js_fastify_ctx_redirect(ctx: Handle, url: i64, status: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_fastify_ctx_redirect", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_ctx_redirect".to_string(), func_id);
+        }
+
+        // ============================================
         // V8 JavaScript Runtime FFI functions
         // ============================================
 
@@ -24722,6 +25045,44 @@ fn compile_expr(
                 ("ethers", false, "formatEther") => "js_ethers_format_ether",
 
                 // ========================================================================
+                // Fastify HTTP Framework
+                // ========================================================================
+                // Constructor (default export called as function)
+                // Always uses _with_opts, passing undefined if no args
+                ("fastify", false, "default") => "js_fastify_create_with_opts",
+                // App methods (object = app instance)
+                ("fastify", true, "get") => "js_fastify_get",
+                ("fastify", true, "post") => "js_fastify_post",
+                ("fastify", true, "put") => "js_fastify_put",
+                ("fastify", true, "delete") => "js_fastify_delete",
+                ("fastify", true, "patch") => "js_fastify_patch",
+                ("fastify", true, "head") => "js_fastify_head",
+                ("fastify", true, "options") => "js_fastify_options",
+                ("fastify", true, "all") => "js_fastify_all",
+                ("fastify", true, "route") => "js_fastify_route",
+                ("fastify", true, "addHook") => "js_fastify_add_hook",
+                ("fastify", true, "setErrorHandler") => "js_fastify_set_error_handler",
+                ("fastify", true, "register") => "js_fastify_register",
+                ("fastify", true, "listen") => "js_fastify_listen",
+                // Request methods (on context.request or context)
+                ("fastify", true, "method") => "js_fastify_req_method",
+                ("fastify", true, "url") => "js_fastify_req_url",
+                ("fastify", true, "params") => "js_fastify_req_params",
+                ("fastify", true, "param") => "js_fastify_req_param",
+                ("fastify", true, "query") => "js_fastify_req_query",
+                ("fastify", true, "body") => "js_fastify_req_body",
+                ("fastify", true, "json") => "js_fastify_req_json",
+                ("fastify", true, "headers") => "js_fastify_req_headers",
+                ("fastify", true, "header") => "js_fastify_req_header",
+                // Reply methods (on context.reply or context)
+                ("fastify", true, "status") => "js_fastify_reply_status",
+                ("fastify", true, "send") => "js_fastify_reply_send",
+                // Hono-style context methods
+                ("fastify", true, "text") => "js_fastify_ctx_text",
+                ("fastify", true, "html") => "js_fastify_ctx_html",
+                ("fastify", true, "redirect") => "js_fastify_ctx_redirect",
+
+                // ========================================================================
                 // Node.js built-in: fs (file system)
                 // ========================================================================
                 ("fs", false, "existsSync") => "js_fs_exists_sync",
@@ -24947,7 +25308,8 @@ fn compile_expr(
                           native_module == "sharp" || native_module == "cheerio" ||
                           native_module == "nodemailer" || native_module == "dayjs" ||
                           native_module == "moment" || native_module == "node-cron" ||
-                          native_module == "rate-limiter-flexible" {
+                          native_module == "rate-limiter-flexible" ||
+                          native_module == "fastify" {
                     // These modules return NaN-boxed pointers, extract the raw pointer
                     let obj_f64 = ensure_f64(builder, obj_val);
                     let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
@@ -25209,6 +25571,164 @@ fn compile_expr(
                 } else if native_module == "node-fetch" {
                     // fetch response methods: text(), json(), status(), ok(), statusText()
                     // All response methods just take the handle - no additional args
+                } else if native_module == "fastify" {
+                    // Fastify instance methods
+                    // NOTE: Fastify runtime expects NaN-boxed values as i64 bits, NOT extracted pointers.
+                    // The runtime calls js_get_string_pointer_unified itself to extract strings.
+                    match method.as_str() {
+                        // Route methods: get(path, handler), post(path, handler), etc.
+                        "get" | "post" | "put" | "delete" | "patch" | "head" | "options" | "all" => {
+                            // (path: string, handler: closure)
+                            if arg_vals.len() >= 2 {
+                                // Pass NaN-boxed path string as i64 bits (runtime extracts it)
+                                let path_f64 = ensure_f64(builder, arg_vals[0]);
+                                let path_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), path_f64);
+                                call_args.push(path_i64);
+
+                                // Handler closure - pass as i64
+                                call_args.push(ensure_i64(builder, arg_vals[1]));
+                            }
+                        }
+                        "route" => {
+                            // route(method, path, handler)
+                            if arg_vals.len() >= 3 {
+                                // Method string - NaN-boxed as i64 bits
+                                let method_f64 = ensure_f64(builder, arg_vals[0]);
+                                let method_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), method_f64);
+                                call_args.push(method_i64);
+
+                                // Path string - NaN-boxed as i64 bits
+                                let path_f64 = ensure_f64(builder, arg_vals[1]);
+                                let path_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), path_f64);
+                                call_args.push(path_i64);
+
+                                // Handler closure
+                                call_args.push(ensure_i64(builder, arg_vals[2]));
+                            }
+                        }
+                        "addHook" => {
+                            // addHook(hookName, handler)
+                            if arg_vals.len() >= 2 {
+                                // Hook name - NaN-boxed as i64 bits
+                                let name_f64 = ensure_f64(builder, arg_vals[0]);
+                                let name_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), name_f64);
+                                call_args.push(name_i64);
+                                call_args.push(ensure_i64(builder, arg_vals[1]));
+                            }
+                        }
+                        "setErrorHandler" => {
+                            // setErrorHandler(handler)
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_i64(builder, arg_vals[0]));
+                            }
+                        }
+                        "register" => {
+                            // register(plugin, opts)
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_i64(builder, arg_vals[0])); // plugin closure
+                            }
+                            if arg_vals.len() >= 2 {
+                                call_args.push(ensure_f64(builder, arg_vals[1])); // opts object
+                            } else {
+                                // No opts - pass undefined
+                                const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                call_args.push(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                            }
+                        }
+                        "listen" => {
+                            // listen(opts, callback)
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_f64(builder, arg_vals[0])); // opts
+                            } else {
+                                const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                call_args.push(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                            }
+                            if arg_vals.len() >= 2 {
+                                call_args.push(ensure_i64(builder, arg_vals[1])); // callback
+                            } else {
+                                call_args.push(builder.ins().iconst(types::I64, 0)); // no callback
+                            }
+                        }
+                        // Request/context methods - these take the context handle
+                        "status" => {
+                            // reply.status(code) - returns handle for chaining
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_f64(builder, arg_vals[0])); // status code
+                            }
+                        }
+                        "header" => {
+                            // reply.header(name, value)
+                            if arg_vals.len() >= 2 {
+                                // Pass NaN-boxed strings as i64 bits
+                                let name_f64 = ensure_f64(builder, arg_vals[0]);
+                                let name_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), name_f64);
+                                call_args.push(name_i64);
+
+                                let val_f64 = ensure_f64(builder, arg_vals[1]);
+                                let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val_f64);
+                                call_args.push(val_i64);
+                            }
+                        }
+                        "send" => {
+                            // reply.send(data)
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_f64(builder, arg_vals[0]));
+                            }
+                        }
+                        "json" => {
+                            // c.json(data, status?) - Hono style
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_f64(builder, arg_vals[0])); // data
+                            }
+                            if arg_vals.len() >= 2 {
+                                call_args.push(ensure_f64(builder, arg_vals[1])); // status
+                            } else {
+                                call_args.push(builder.ins().f64const(0.0)); // default (use context's status)
+                            }
+                        }
+                        "text" | "html" => {
+                            // c.text(text, status?) or c.html(html, status?)
+                            if !arg_vals.is_empty() {
+                                // Pass NaN-boxed text as i64 bits
+                                let text_f64 = ensure_f64(builder, arg_vals[0]);
+                                let text_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), text_f64);
+                                call_args.push(text_i64);
+                            }
+                            if arg_vals.len() >= 2 {
+                                call_args.push(ensure_f64(builder, arg_vals[1])); // status
+                            } else {
+                                call_args.push(builder.ins().f64const(0.0));
+                            }
+                        }
+                        "redirect" => {
+                            // c.redirect(url, status?)
+                            if !arg_vals.is_empty() {
+                                // Pass NaN-boxed URL as i64 bits
+                                let url_f64 = ensure_f64(builder, arg_vals[0]);
+                                let url_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), url_f64);
+                                call_args.push(url_i64);
+                            }
+                            if arg_vals.len() >= 2 {
+                                call_args.push(ensure_f64(builder, arg_vals[1])); // status
+                            } else {
+                                call_args.push(builder.ins().f64const(0.0)); // default 302
+                            }
+                        }
+                        "param" => {
+                            // c.req.param(name) - get single param
+                            if !arg_vals.is_empty() {
+                                // Pass NaN-boxed name as i64 bits
+                                let name_f64 = ensure_f64(builder, arg_vals[0]);
+                                let name_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), name_f64);
+                                call_args.push(name_i64);
+                            }
+                        }
+                        // Methods with no additional args
+                        "method" | "url" | "params" | "query" | "body" | "headers" => {
+                            // These just take the context handle - no additional args
+                        }
+                        _ => {}
+                    }
                 }
 
                 call_args
@@ -25537,6 +26057,23 @@ fn compile_expr(
                         }
                         _ => arg_vals.clone()
                     }
+                } else if native_module == "fastify" {
+                    // fastify module functions
+                    match method.as_str() {
+                        "default" => {
+                            // Fastify(opts?) - create app with optional config
+                            // js_fastify_create_with_opts(opts: f64) -> Handle
+                            if !arg_vals.is_empty() {
+                                // Pass the options object as f64
+                                vec![ensure_f64(builder, arg_vals[0])]
+                            } else {
+                                // Pass undefined (TAG_UNDEFINED)
+                                const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                                vec![builder.ins().f64const(f64::from_bits(TAG_UNDEFINED))]
+                            }
+                        }
+                        _ => arg_vals.clone()
+                    }
                 } else {
                     arg_vals.clone()
                 }
@@ -25633,7 +26170,7 @@ fn compile_expr(
                           native_module == "events" || native_module == "lru-cache" ||
                           native_module == "commander" ||
                           native_module == "decimal.js" || native_module == "big.js" ||
-                          native_module == "bignumber.js" {
+                          native_module == "bignumber.js" || native_module == "fastify" {
                     // These modules return object pointers - NaN-box with POINTER_TAG
                     let nanbox_func = extern_funcs.get("js_nanbox_pointer")
                         .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.80
+**Current Version:** 0.2.81
 
 ## Workflow Requirements
 
@@ -235,9 +235,18 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.80)
+## Recent Fixes (v0.2.37-0.2.81)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.81
+- Fix cross-module function calls via re-exports causing argument count mismatch errors
+  - Extended the `imported_func_param_counts` propagation to handle `export * from "./module"` re-exports
+  - Previously only direct imports were tracked, so re-exported functions with optional params would fail
+  - Example: If module B exports `queryFunc(a, b, c?)` and module A has `export * from "./B"`,
+    imports from A would not know the full param count, causing wrapper signature mismatches
+  - Fix: Re-export propagation loop now iterates over both classes AND functions until no new entries are added
+  - Supports chained re-exports (A re-exports B which re-exports C)
 
 ### v0.2.80
 - Add codegen integration for Fastify HTTP framework

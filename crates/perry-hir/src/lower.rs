@@ -4420,6 +4420,18 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                 args,
                             });
                         }
+
+                        // Check if this is a call on a default import from a native module
+                        // e.g., Fastify() where import Fastify from 'fastify'
+                        if let Some((module_name, None)) = ctx.lookup_native_module(func_name) {
+                            return Ok(Expr::NativeMethodCall {
+                                module: module_name.to_string(),
+                                class_name: None,
+                                object: None,
+                                method: "default".to_string(), // Use "default" for default export calls
+                                args,
+                            });
+                        }
                     }
 
                     let callee_expr = lower_expr(ctx, expr)?;
@@ -6964,7 +6976,9 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
             collect_local_refs_expr(else_expr, refs);
         }
         Expr::Closure { body, .. } => {
-            // Don't descend into nested closures - they have their own captures
+            // Descend into nested closures to find transitive captures.
+            // If a nested closure uses a variable from the outer scope,
+            // the outer closure must also capture it to pass it down.
             for stmt in body {
                 collect_local_refs_stmt(stmt, refs);
             }

@@ -45,6 +45,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "decimal.js",
     "bignumber.js",
     "exponential-backoff",
+    // HTTP framework
+    "fastify",
 ];
 
 /// Check if a module path refers to a native stdlib module

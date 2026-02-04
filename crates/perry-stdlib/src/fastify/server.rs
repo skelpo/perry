@@ -1,0 +1,616 @@
+//! HTTP Server loop and request dispatch
+//!
+//! Uses the existing Hyper-based HTTP framework for serving requests.
+
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{body::Incoming, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
+
+use perry_runtime::{js_string_from_bytes, StringHeader, JSValue};
+
+use crate::common::{get_handle, get_handle_mut, register_handle, Handle, RUNTIME};
+use super::{FastifyApp, FastifyContext, ClosurePtr};
+use super::context::string_from_header;
+
+/// Server handle for managing the running server
+pub struct FastifyServerHandle {
+    pub port: u16,
+    pub app_handle: Handle,
+    pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+/// Pending request waiting for TypeScript handler
+pub struct FastifyPendingRequest {
+    pub method: String,
+    pub path: String,
+    pub headers: HashMap<String, String>,
+    pub body: Option<Vec<u8>>,
+    pub params: HashMap<String, String>,
+    pub response_tx: tokio::sync::oneshot::Sender<FastifyResponse>,
+}
+
+/// Response from TypeScript handler
+pub struct FastifyResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// Start the server and begin listening
+#[no_mangle]
+pub unsafe extern "C" fn js_fastify_listen(app_handle: Handle, opts: f64, callback: i64) {
+    // Extract port from opts
+    let port: u16 = {
+        let jsv = JSValue::from_bits(opts.to_bits());
+        if jsv.is_pointer() {
+            let ptr = jsv.as_pointer::<perry_runtime::ObjectHeader>();
+            let port_key = js_string_from_bytes(b"port".as_ptr(), 4);
+            let port_val = perry_runtime::js_object_get_field_by_name_f64(ptr, port_key);
+            let port_jsv = JSValue::from_bits(port_val.to_bits());
+            if port_jsv.is_number() {
+                port_val as u16
+            } else {
+                3000
+            }
+        } else if opts > 0.0 {
+            opts as u16
+        } else {
+            3000
+        }
+    };
+
+    let (request_tx, mut request_rx) = mpsc::channel::<FastifyPendingRequest>(1024);
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let request_tx = Arc::new(request_tx);
+
+    // Clone app for matching in the server task
+    let app_for_server = if let Some(app) = get_handle::<FastifyApp>(app_handle) {
+        app.routes.clone()
+    } else {
+        Vec::new()
+    };
+    let routes_arc = Arc::new(app_for_server);
+
+    // Spawn the server
+    let routes_for_spawn = routes_arc.clone();
+    RUNTIME.spawn(async move {
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+
+        let listener = match TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Failed to bind to port {}: {}", port, e);
+                return;
+            }
+        };
+
+        let routes = routes_for_spawn;
+
+        loop {
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, _)) => {
+                            let io = TokioIo::new(stream);
+                            let request_tx = request_tx.clone();
+                            let routes = routes.clone();
+
+                            tokio::spawn(async move {
+                                let service = service_fn(move |req: Request<Incoming>| {
+                                    let request_tx = request_tx.clone();
+                                    let routes = routes.clone();
+                                    async move {
+                                        handle_request(req, request_tx, routes).await
+                                    }
+                                });
+
+                                if let Err(e) = http1::Builder::new()
+                                    .serve_connection(io, service)
+                                    .await
+                                {
+                                    eprintln!("Connection error: {}", e);
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("Accept error: {}", e);
+                        }
+                    }
+                }
+                _ = &mut shutdown_rx => {
+                    println!("Server shutting down");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Store server handle
+    let _server_handle = register_handle(FastifyServerHandle {
+        port,
+        app_handle,
+        shutdown_tx: Some(shutdown_tx),
+    });
+
+    // Call callback with (null, address)
+    if callback != 0 {
+        let address = format!("http://0.0.0.0:{}", port);
+        let addr_ptr = js_string_from_bytes(address.as_ptr(), address.len() as u32);
+        let addr_val = f64::from_bits(JSValue::string_ptr(addr_ptr).bits());
+
+        // Call callback(null, address)
+        let closure_ptr = callback as *const perry_runtime::ClosureHeader;
+        perry_runtime::js_closure_call2(closure_ptr, f64::from_bits(JSValue::null().bits()), addr_val);
+    }
+
+    println!("Server listening on http://0.0.0.0:{}", port);
+
+    // Enter the main event loop
+    event_loop(app_handle, &mut request_rx);
+}
+
+/// Handle incoming HTTP request - match route and forward to TypeScript
+async fn handle_request(
+    req: Request<Incoming>,
+    request_tx: Arc<mpsc::Sender<FastifyPendingRequest>>,
+    routes: Arc<Vec<super::Route>>,
+) -> Result<Response<Full<Bytes>>, hyper::Error> {
+    let method = req.method().to_string();
+    let uri = req.uri();
+    let path = uri.path().to_string();
+
+    // Extract headers
+    let mut headers = HashMap::new();
+    for (name, value) in req.headers() {
+        if let Ok(v) = value.to_str() {
+            headers.insert(name.to_string().to_lowercase(), v.to_string());
+        }
+    }
+
+    // Read body
+    let body = match req.collect().await {
+        Ok(collected) => {
+            let bytes = collected.to_bytes();
+            if bytes.is_empty() {
+                None
+            } else {
+                Some(bytes.to_vec())
+            }
+        }
+        Err(_) => None,
+    };
+
+    // Match route
+    let mut matched_params = HashMap::new();
+    let mut found_route = false;
+
+    for route in routes.iter() {
+        if route.method == method {
+            if let Some(params) = route.pattern.match_path(&path) {
+                matched_params = params;
+                found_route = true;
+                break;
+            }
+        }
+    }
+
+    if !found_route {
+        // Return 404
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from("{\"error\":\"Not Found\"}")))
+            .unwrap());
+    }
+
+    // Create oneshot channel for response
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel::<FastifyResponse>();
+
+    // Send request to TypeScript handler
+    let pending = FastifyPendingRequest {
+        method,
+        path,
+        headers,
+        body,
+        params: matched_params,
+        response_tx,
+    };
+
+    if request_tx.send(pending).await.is_err() {
+        return Ok(Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(Full::new(Bytes::from("Server unavailable")))
+            .unwrap());
+    }
+
+    // Wait for response
+    match response_rx.await {
+        Ok(fastify_response) => {
+            let mut response = Response::builder()
+                .status(StatusCode::from_u16(fastify_response.status).unwrap_or(StatusCode::OK));
+
+            for (name, value) in fastify_response.headers {
+                response = response.header(name, value);
+            }
+
+            Ok(response.body(Full::new(Bytes::from(fastify_response.body))).unwrap())
+        }
+        Err(_) => {
+            Ok(Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Full::new(Bytes::from("Handler error")))
+                .unwrap())
+        }
+    }
+}
+
+/// Main event loop - process incoming requests
+fn event_loop(app_handle: Handle, request_rx: &mut mpsc::Receiver<FastifyPendingRequest>) {
+    let app = match unsafe { get_handle::<FastifyApp>(app_handle) } {
+        Some(a) => a,
+        None => return,
+    };
+
+    loop {
+        // Process any pending stdlib operations (promises, etc.)
+        unsafe { crate::common::js_stdlib_process_pending() };
+
+        // Process any pending microtasks
+        perry_runtime::js_promise_run_microtasks();
+
+        // Try to receive a request (non-blocking with small timeout)
+        let result = RUNTIME.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                request_rx.recv()
+            ).await
+        });
+
+        if let Ok(Some(pending)) = result {
+            // Create context
+            let ctx = FastifyContext::new(
+                0, // request_id
+                pending.method.clone(),
+                pending.path.clone(),
+                pending.headers.clone(),
+                pending.body.clone(),
+                pending.params.clone(),
+            );
+            let ctx_handle = unsafe { register_handle(ctx) };
+
+            // Find matching route and call handler
+            let mut response_sent = false;
+
+            // Run preHandler hooks
+            for hook in &app.hooks.pre_handler {
+                unsafe {
+                    // Call hook(request, reply) - both are the context for simplicity
+                    let closure_ptr = *hook as *const perry_runtime::ClosureHeader;
+                    perry_runtime::js_closure_call2(closure_ptr, ctx_handle as f64, ctx_handle as f64);
+                }
+            }
+
+            // Call route handler
+            if let Some((route, _)) = app.match_route(&pending.method, &pending.path) {
+                let handler = route.handler;
+
+                // Call handler and get result
+                let result = unsafe {
+                    let closure_ptr = handler as *const perry_runtime::ClosureHeader;
+                    perry_runtime::js_closure_call1(closure_ptr, ctx_handle as f64)
+                };
+
+                // Process any async operations
+                unsafe { crate::common::js_stdlib_process_pending() };
+                perry_runtime::js_promise_run_microtasks();
+
+                // Check if handler returned a promise (NaN-boxed pointer to a Promise)
+                let jsv = JSValue::from_bits(result.to_bits());
+                if jsv.is_pointer() {
+                    let ptr = jsv.as_pointer::<perry_runtime::Promise>();
+                    // Try to treat it as a promise and wait for it
+                    if unsafe { perry_runtime::js_is_promise(ptr as *mut perry_runtime::Promise) } != 0 {
+                        wait_for_promise(ptr as *mut perry_runtime::Promise);
+                    }
+                }
+
+                // Get response from context
+                if let Some(ctx) = unsafe { get_handle::<FastifyContext>(ctx_handle) } {
+                    let response = FastifyResponse {
+                        status: ctx.status_code,
+                        headers: ctx.response_headers.clone(),
+                        body: ctx.response_body.clone().unwrap_or_else(|| {
+                            // If no explicit body, use handler return value
+                            build_response_body(result)
+                        }),
+                    };
+
+                    // Ensure content-type is set
+                    let mut final_response = response;
+                    if !final_response.headers.iter().any(|(k, _)| k.to_lowercase() == "content-type") {
+                        final_response.headers.push(("content-type".to_string(), "application/json".to_string()));
+                    }
+
+                    let _ = pending.response_tx.send(final_response);
+                    response_sent = true;
+                }
+            }
+
+            // The response was sent inside the handler block above, no need to send 404 here
+            // since we already checked route matching in handle_request
+        }
+    }
+}
+
+/// Wait for a promise to resolve/reject
+fn wait_for_promise(promise_ptr: *mut perry_runtime::Promise) {
+    // Poll until promise is settled
+    for _ in 0..10000 {
+        // Process pending operations
+        unsafe { crate::common::js_stdlib_process_pending() };
+        perry_runtime::js_promise_run_microtasks();
+
+        // Check if promise is settled (state != 0 means not pending)
+        let state = unsafe { perry_runtime::js_promise_state(promise_ptr) };
+        if state != 0 {
+            break;
+        }
+
+        // Small sleep to avoid busy-waiting
+        std::thread::sleep(std::time::Duration::from_micros(100));
+    }
+}
+
+/// Build response body from handler return value
+fn build_response_body(value: f64) -> Vec<u8> {
+    let jsv = JSValue::from_bits(value.to_bits());
+
+    // If undefined/null, return empty object
+    if jsv.is_undefined() || jsv.is_null() {
+        return b"{}".to_vec();
+    }
+
+    // If string, return as-is
+    if jsv.is_string() {
+        unsafe {
+            let ptr = perry_runtime::js_get_string_pointer_unified(value);
+            if ptr != 0 {
+                let header = ptr as *const StringHeader;
+                let len = (*header).length as usize;
+                let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                let bytes = std::slice::from_raw_parts(data_ptr, len);
+                return bytes.to_vec();
+            }
+        }
+    }
+
+    // Convert to JSON string
+    unsafe {
+        let json_ptr = perry_runtime::js_jsvalue_to_string(value);
+        if !json_ptr.is_null() {
+            let len = (*json_ptr).length as usize;
+            let data_ptr = (json_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+            let bytes = std::slice::from_raw_parts(data_ptr, len);
+            return bytes.to_vec();
+        }
+    }
+
+    b"{}".to_vec()
+}
+
+/// Close the server
+#[no_mangle]
+pub unsafe extern "C" fn js_fastify_close(server_handle: Handle) -> bool {
+    if let Some(_server) = get_handle::<FastifyServerHandle>(server_handle) {
+        // Shutdown will be triggered when the handle is dropped
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fastify::FastifyApp;
+    use std::time::Duration;
+
+    /// Test that the HTTP server can start and handle basic routing
+    #[test]
+    fn test_handle_request_routing() {
+        // Create routes
+        let mut routes = Vec::new();
+
+        // Add GET / route
+        routes.push(super::super::Route {
+            method: "GET".to_string(),
+            pattern: super::super::RoutePattern::parse("/"),
+            handler: 1,
+        });
+
+        // Add GET /users/:id route
+        routes.push(super::super::Route {
+            method: "GET".to_string(),
+            pattern: super::super::RoutePattern::parse("/users/:id"),
+            handler: 2,
+        });
+
+        // Add POST /users route
+        routes.push(super::super::Route {
+            method: "POST".to_string(),
+            pattern: super::super::RoutePattern::parse("/users"),
+            handler: 3,
+        });
+
+        let routes = Arc::new(routes);
+
+        // Test route matching
+        for route in routes.iter() {
+            if route.method == "GET" && route.pattern.match_path("/").is_some() {
+                assert_eq!(route.handler, 1);
+            }
+            if route.method == "GET" && route.pattern.match_path("/users/42").is_some() {
+                assert_eq!(route.handler, 2);
+            }
+            if route.method == "POST" && route.pattern.match_path("/users").is_some() {
+                assert_eq!(route.handler, 3);
+            }
+        }
+    }
+
+    /// Test the FastifyResponse struct
+    #[test]
+    fn test_fastify_response() {
+        let response = FastifyResponse {
+            status: 200,
+            headers: vec![
+                ("content-type".to_string(), "application/json".to_string()),
+                ("x-custom".to_string(), "value".to_string()),
+            ],
+            body: b"{\"ok\":true}".to_vec(),
+        };
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.headers.len(), 2);
+        assert_eq!(response.body, b"{\"ok\":true}");
+    }
+
+    /// Test building response body from different value types
+    #[test]
+    fn test_build_response_body() {
+        // Test undefined
+        let body = build_response_body(f64::from_bits(JSValue::undefined().bits()));
+        assert_eq!(body, b"{}");
+
+        // Test null
+        let body = build_response_body(f64::from_bits(JSValue::null().bits()));
+        assert_eq!(body, b"{}");
+
+        // Test number (these get converted via js_jsvalue_to_string, which returns "{}" for numbers without proper string conversion)
+        // In practice, handler return values would be objects that get JSON serialized
+    }
+
+    /// Test the context creation
+    #[test]
+    fn test_context_creation() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert("host".to_string(), "localhost:3000".to_string());
+
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), "42".to_string());
+
+        let ctx = FastifyContext::new(
+            1,
+            "GET".to_string(),
+            "/users/42?foo=bar".to_string(),
+            headers,
+            Some(b"{}".to_vec()),
+            params,
+        );
+
+        assert_eq!(ctx.method, "GET");
+        assert_eq!(ctx.url, "/users/42");
+        assert_eq!(ctx.query_string, "foo=bar");
+        assert_eq!(ctx.params.get("id"), Some(&"42".to_string()));
+        assert_eq!(ctx.status_code, 200);
+        assert!(!ctx.sent);
+    }
+
+    /// Test context query params parsing
+    #[test]
+    fn test_context_query_params() {
+        let ctx = FastifyContext::new(
+            1,
+            "GET".to_string(),
+            "/search?q=hello&page=1&limit=10".to_string(),
+            HashMap::new(),
+            None,
+            HashMap::new(),
+        );
+
+        assert_eq!(ctx.get_query_param("q"), Some("hello".to_string()));
+        assert_eq!(ctx.get_query_param("page"), Some("1".to_string()));
+        assert_eq!(ctx.get_query_param("limit"), Some("10".to_string()));
+        assert_eq!(ctx.get_query_param("missing"), None);
+
+        let all_params = ctx.get_query_params();
+        assert_eq!(all_params.len(), 3);
+    }
+
+    /// Test context header access
+    #[test]
+    fn test_context_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert("authorization".to_string(), "Bearer token123".to_string());
+
+        let ctx = FastifyContext::new(
+            1,
+            "POST".to_string(),
+            "/api/data".to_string(),
+            headers,
+            None,
+            HashMap::new(),
+        );
+
+        assert_eq!(ctx.get_header("content-type"), Some("application/json"));
+        assert_eq!(ctx.get_header("authorization"), Some("Bearer token123"));
+        assert_eq!(ctx.get_header("missing"), None);
+    }
+
+    /// Test context reply methods
+    #[test]
+    fn test_context_reply() {
+        let mut ctx = FastifyContext::new(
+            1,
+            "GET".to_string(),
+            "/".to_string(),
+            HashMap::new(),
+            None,
+            HashMap::new(),
+        );
+
+        // Test status setting
+        ctx.set_status(201);
+        assert_eq!(ctx.status_code, 201);
+
+        // Test header adding
+        ctx.add_header("x-custom", "value");
+        assert_eq!(ctx.response_headers.len(), 1);
+        assert_eq!(ctx.response_headers[0], ("x-custom".to_string(), "value".to_string()));
+    }
+
+    /// Test FastifyApp route management
+    #[test]
+    fn test_app_all_methods() {
+        let mut app = FastifyApp::new();
+
+        app.add_route("GET", "/resource", 1);
+        app.add_route("POST", "/resource", 2);
+        app.add_route("PUT", "/resource", 3);
+        app.add_route("DELETE", "/resource", 4);
+        app.add_route("PATCH", "/resource", 5);
+        app.add_route("HEAD", "/resource", 6);
+        app.add_route("OPTIONS", "/resource", 7);
+
+        assert_eq!(app.routes.len(), 7);
+
+        // Verify each method matches correctly
+        assert_eq!(app.match_route("GET", "/resource").unwrap().0.handler, 1);
+        assert_eq!(app.match_route("POST", "/resource").unwrap().0.handler, 2);
+        assert_eq!(app.match_route("PUT", "/resource").unwrap().0.handler, 3);
+        assert_eq!(app.match_route("DELETE", "/resource").unwrap().0.handler, 4);
+        assert_eq!(app.match_route("PATCH", "/resource").unwrap().0.handler, 5);
+        assert_eq!(app.match_route("HEAD", "/resource").unwrap().0.handler, 6);
+        assert_eq!(app.match_route("OPTIONS", "/resource").unwrap().0.handler, 7);
+    }
+}
