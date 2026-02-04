@@ -1244,7 +1244,7 @@ fn scan_stmt_for_native_instances(
 ) {
     match stmt {
         Stmt::Let { id, name, init: Some(init_expr), .. } => {
-            if let Some((native_module, class_name)) = detect_native_instance_creation(init_expr) {
+            if let Some((native_module, class_name)) = detect_native_instance_creation_with_context(init_expr, local_ids) {
                 local_names.insert(name.clone(), (native_module.clone(), class_name.clone()));
                 local_ids.insert(*id, (native_module, class_name));
             }
@@ -1555,9 +1555,12 @@ fn fix_native_instance_expr_with_locals(
     }
 }
 
-/// Detect if an expression is creating a native module instance
+/// Detect if an expression is creating a native module instance (with context for local variables)
 /// Returns Some((module_name, class_name)) if it is
-fn detect_native_instance_creation(expr: &Expr) -> Option<(String, String)> {
+fn detect_native_instance_creation_with_context(
+    expr: &Expr,
+    local_ids: &HashMap<LocalId, (String, String)>,
+) -> Option<(String, String)> {
     match expr {
         Expr::NativeMethodCall { module, object: None, method, .. } => {
             // Creation functions like mysql.createPool(), mysql.createConnection()
@@ -1568,7 +1571,45 @@ fn detect_native_instance_creation(expr: &Expr) -> Option<(String, String)> {
             };
             Some((module.clone(), class_name.to_string()))
         }
+        Expr::NativeMethodCall { module, object: Some(_), class_name: Some(class), method, .. } => {
+            // Instance methods that return new native instances
+            // e.g., pool.getConnection() returns a PoolConnection
+            match (module.as_str(), class.as_str(), method.as_str()) {
+                ("mysql2" | "mysql2/promise", "Pool", "getConnection") => {
+                    Some((module.clone(), "PoolConnection".to_string()))
+                }
+                ("pg", "Pool", "connect") => {
+                    Some((module.clone(), "PoolClient".to_string()))
+                }
+                ("ioredis", "Redis", "duplicate") => {
+                    Some((module.clone(), "Redis".to_string()))
+                }
+                _ => None,
+            }
+        }
+        // Handle Call expressions where the object is a known native instance
+        // This is the pattern BEFORE transformation: pool.getConnection()
         Expr::Call { callee, .. } => {
+            if let Expr::PropertyGet { object, property } = callee.as_ref() {
+                // Check if object is a LocalGet of a known native instance
+                if let Expr::LocalGet(local_id) = object.as_ref() {
+                    if let Some((module, class)) = local_ids.get(local_id) {
+                        // Check if this method returns a native instance
+                        return match (module.as_str(), class.as_str(), property.as_str()) {
+                            ("mysql2" | "mysql2/promise", "Pool", "getConnection") => {
+                                Some((module.clone(), "PoolConnection".to_string()))
+                            }
+                            ("pg", "Pool", "connect") => {
+                                Some((module.clone(), "PoolClient".to_string()))
+                            }
+                            ("ioredis", "Redis", "duplicate") => {
+                                Some((module.clone(), "Redis".to_string()))
+                            }
+                            _ => None,
+                        };
+                    }
+                }
+            }
             // Check for global fetch() call
             if let Expr::ExternFuncRef { name, .. } = callee.as_ref() {
                 if name == "fetch" {
@@ -1579,9 +1620,16 @@ fn detect_native_instance_creation(expr: &Expr) -> Option<(String, String)> {
             None
         }
         Expr::Await(inner) => {
-            // Async creation: await mysql.createConnection() or await fetch()
-            detect_native_instance_creation(inner)
+            // Async creation: await mysql.createConnection() or await pool.getConnection() or await fetch()
+            detect_native_instance_creation_with_context(inner, local_ids)
         }
         _ => None,
     }
+}
+
+/// Detect if an expression is creating a native module instance
+/// Returns Some((module_name, class_name)) if it is
+fn detect_native_instance_creation(expr: &Expr) -> Option<(String, String)> {
+    // Backward compatibility wrapper - empty context
+    detect_native_instance_creation_with_context(expr, &HashMap::new())
 }

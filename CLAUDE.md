@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.70
+**Current Version:** 0.2.74
 
 ## Workflow Requirements
 
@@ -205,9 +205,43 @@ To test a feature, compile and run:
 cargo run --release -- test_factorial.ts && ./test_factorial
 ```
 
-## Recent Fixes (v0.2.37-0.2.70)
+## Recent Fixes (v0.2.37-0.2.74)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.74
+- Fix pool.getConnection() - full support for getting connections and calling methods on them
+  - Extended `detect_native_instance_creation_with_context` to track variables assigned from `await pool.getConnection()`
+  - `PoolConnection` class type now tracked through await expressions
+  - Added `js_mysql2_pool_connection_execute` for prepared statements on pool connections
+  - Codegen now routes `PoolConnection` methods to correct FFI functions (`query`, `execute`, `release`)
+  - Fixed `js_mysql2_pool_connection_release` to enter tokio runtime context before dropping connection
+  - Full example now works: `const conn = await pool.getConnection(); await conn.query(...); conn.release();`
+
+### v0.2.73
+- Partial fix for pool.getConnection() - connection acquisition works but method calls on the connection crash
+  - Implemented `MysqlPoolConnectionHandle` wrapper with proper connection lifecycle
+  - `js_mysql2_pool_get_connection` now acquires actual connections from the pool
+  - Connection handle is NaN-boxed with POINTER_TAG for proper extraction
+  - Promise resolution correctly passes the NaN-boxed handle to JavaScript
+  - `js_mysql2_connection_query` now handles both regular and pool connections
+  - ~~**Known issue**: After `await pool.getConnection()`, calling methods like `conn.release()` crashes~~ (fixed in v0.2.74)
+
+### v0.2.72
+- Fix mysql2 config parsing using wrong fields
+  - Changed `parse_mysql_config` to use field names (`host`, `user`, `password`, etc.) instead of field indices
+  - Now uses `js_object_get_field_by_name` for proper field lookup
+  - Fixes issue where `user` and `password` fields were swapped
+- Fix pool.getConnection() SIGSEGV crash
+  - Added extern function declarations for `js_mysql2_pool_get_connection` and `js_mysql2_pool_connection_release`
+  - Added method mappings in codegen for `getConnection` and `release`
+  - Now returns proper error message instead of crashing
+
+### v0.2.71
+- Fix BigInt.toString() SIGSEGV crash
+  - BigInt variables were stored as I64 (raw pointer) but values were NaN-boxed F64
+  - Changed BigInt storage to F64 (is_pointer=false) to match NaN-boxed representation
+  - BigInt.toString() now correctly extracts pointer via `js_nanbox_get_bigint`
 
 ### v0.2.70
 - Fix ethers.formatUnits() and ethers.parseUnits() SIGSEGV crash

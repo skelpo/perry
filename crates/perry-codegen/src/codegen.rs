@@ -4695,6 +4695,60 @@ impl Compiler {
             self.extern_funcs.insert("js_mysql2_pool_end".to_string(), func_id);
         }
 
+        // js_mysql2_pool_get_connection(pool: i64) -> *mut Promise (i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // pool handle
+            sig.returns.push(AbiParam::new(types::I64)); // Promise pointer
+            let func_id = self.module.declare_function(
+                "js_mysql2_pool_get_connection",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_mysql2_pool_get_connection".to_string(), func_id);
+        }
+
+        // js_mysql2_pool_connection_release(conn: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // connection handle
+            let func_id = self.module.declare_function(
+                "js_mysql2_pool_connection_release",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_mysql2_pool_connection_release".to_string(), func_id);
+        }
+
+        // js_mysql2_pool_connection_query(conn: i64, sql: i64) -> *mut Promise (i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // connection handle
+            sig.params.push(AbiParam::new(types::I64)); // sql string pointer
+            sig.returns.push(AbiParam::new(types::I64)); // Promise pointer
+            let func_id = self.module.declare_function(
+                "js_mysql2_pool_connection_query",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_mysql2_pool_connection_query".to_string(), func_id);
+        }
+
+        // js_mysql2_pool_connection_execute(conn: i64, sql: i64, params: f64) -> *mut Promise (i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // connection handle
+            sig.params.push(AbiParam::new(types::I64)); // sql string pointer
+            sig.params.push(AbiParam::new(types::F64)); // params array (JSValue)
+            sig.returns.push(AbiParam::new(types::I64)); // Promise pointer
+            let func_id = self.module.declare_function(
+                "js_mysql2_pool_connection_execute",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_mysql2_pool_connection_execute".to_string(), func_id);
+        }
+
         // js_stdlib_process_pending() -> i32 (number of resolutions processed)
         {
             let mut sig = self.module.make_signature();
@@ -10556,6 +10610,7 @@ fn compile_stmt(
                 HirType::Object(_) | HirType::Named(_) | HirType::Generic { .. } |
                 HirType::Function(_));
             let is_typed_string = matches!(ty, HirType::String);
+            let is_typed_bigint_check = matches!(ty, HirType::BigInt);
 
             // Helper to detect if an expression produces a string (fallback for untyped cases)
             // Note: EnvGet is NOT included here because it can return undefined if the env var doesn't exist
@@ -10771,6 +10826,9 @@ fn compile_stmt(
             } else if is_typed_string {
                 // String type uses f64 (NaN-boxed) but is_string = true for console.log
                 (None, false, false, true, false, false, false, false, false, false)
+            } else if is_typed_bigint_check {
+                // BigInt type uses f64 (NaN-boxed) but is_bigint = true for method calls
+                (None, false, false, false, true, false, false, false, false, false)
             } else if is_typed_pointer {
                 // Type annotation tells us the type (non-string pointer types use i64)
                 let class_name = typed_class_name.or_else(|| {
@@ -10804,7 +10862,9 @@ fn compile_stmt(
                     // Buffer expressions return buffer pointers
                     Some(expr) if is_buffer_expr(expr) => (None, true, false, false, false, false, false, false, true, false),
                     Some(Expr::Closure { .. }) => (None, true, false, false, false, true, false, false, false, false),
-                    Some(expr) if is_bigint_expr(expr, locals) => (None, true, false, false, true, false, false, false, false, false),
+                    // BigInt literals - stored as NaN-boxed F64 (is_pointer = false)
+                    Some(Expr::BigInt(_)) => (None, false, false, false, true, false, false, false, false, false),
+                    Some(expr) if is_bigint_expr(expr, locals) => (None, false, false, false, true, false, false, false, false, false),
                     Some(expr) if is_string_expr(expr, locals) => (None, false, false, true, false, false, false, false, false, false),
                     Some(expr) if is_closure_expr(expr, locals, closure_returning_funcs) => (None, true, false, false, false, true, false, false, false, false),
                     // JsonParse returns any type - mark as union for dynamic typeof
@@ -23941,8 +24001,9 @@ fn compile_expr(
                 .map(|a| compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, locals, a, this_ctx))
                 .collect::<Result<_>>()?;
 
-            // Check if this is a Pool or Connection instance
+            // Check if this is a Pool, PoolConnection, or Connection instance
             let is_pool = class_name.as_deref() == Some("Pool");
+            let is_pool_connection = class_name.as_deref() == Some("PoolConnection");
 
             // Determine which FFI function to call based on module, class, and method
             let func_name = match (native_module.as_str(), object.is_some(), method.as_str()) {
@@ -23950,13 +24011,17 @@ fn compile_expr(
                 ("mysql2" | "mysql2/promise", false, "createConnection") => "js_mysql2_create_connection",
                 ("mysql2" | "mysql2/promise", false, "createPool") => "js_mysql2_create_pool",
 
-                // mysql2 methods - use Pool or Connection functions based on class_name
+                // mysql2 methods - use Pool, PoolConnection, or Connection functions based on class_name
                 ("mysql2" | "mysql2/promise", true, "query") if is_pool => "js_mysql2_pool_query",
+                ("mysql2" | "mysql2/promise", true, "query") if is_pool_connection => "js_mysql2_pool_connection_query",
                 ("mysql2" | "mysql2/promise", true, "query") => "js_mysql2_connection_query",
                 ("mysql2" | "mysql2/promise", true, "execute") if is_pool => "js_mysql2_pool_execute",
+                ("mysql2" | "mysql2/promise", true, "execute") if is_pool_connection => "js_mysql2_pool_connection_execute",
                 ("mysql2" | "mysql2/promise", true, "execute") => "js_mysql2_connection_execute",
                 ("mysql2" | "mysql2/promise", true, "end") if is_pool => "js_mysql2_pool_end",
                 ("mysql2" | "mysql2/promise", true, "end") => "js_mysql2_connection_end",
+                ("mysql2" | "mysql2/promise", true, "getConnection") => "js_mysql2_pool_get_connection",
+                ("mysql2" | "mysql2/promise", true, "release") => "js_mysql2_pool_connection_release",
                 ("mysql2" | "mysql2/promise", true, "beginTransaction") => "js_mysql2_connection_begin_transaction",
                 ("mysql2" | "mysql2/promise", true, "commit") => "js_mysql2_connection_commit",
                 ("mysql2" | "mysql2/promise", true, "rollback") => "js_mysql2_connection_rollback",
