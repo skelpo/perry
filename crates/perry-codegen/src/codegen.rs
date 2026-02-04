@@ -21106,9 +21106,35 @@ fn compile_expr(
                         let result = results[0];
 
                         // Some functions return i64 (like setTimeout which returns Promise*)
-                        // Bitcast to f64 for uniform expression type handling
+                        // Need to properly NaN-box handles and strings for uniform expression type handling
                         let result_type = builder.func.dfg.value_type(result);
                         if result_type == types::I64 {
+                            // HTTP server/request handle functions need NaN-boxing with POINTER_TAG
+                            if func_name == "js_http_server_create" || func_name == "js_http_server_accept_v2" {
+                                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                let nanbox_call = builder.ins().call(nanbox_ref, &[result]);
+                                return Ok(builder.inst_results(nanbox_call)[0]);
+                            }
+                            // HTTP string-returning functions need NaN-boxing with STRING_TAG
+                            if func_name.starts_with("js_http_request_method")
+                                || func_name.starts_with("js_http_request_path")
+                                || func_name.starts_with("js_http_request_query")
+                                || func_name.starts_with("js_http_request_body")
+                                || func_name.starts_with("js_http_request_content_type")
+                                || func_name.starts_with("js_http_request_header")
+                                || func_name == "js_http_request_query_all"
+                                || func_name == "js_http_request_headers_all"
+                                || func_name == "js_http_respond_status_text"
+                            {
+                                let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                let nanbox_call = builder.ins().call(nanbox_ref, &[result]);
+                                return Ok(builder.inst_results(nanbox_call)[0]);
+                            }
+                            // Other i64 returns (like setTimeout returning Promise*) - bitcast
                             return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result));
                         }
                         return Ok(result);
@@ -23782,8 +23808,13 @@ fn compile_expr(
                 builder.ins().call(set_keys_ref, &[obj_ptr_i64, keys_arr_i64]);
             }
 
-            // Return as f64-bitcasted pointer
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), obj_ptr))
+            // NaN-box the object pointer with POINTER_TAG for proper runtime identification
+            let nanbox_ptr_func = extern_funcs.get("js_nanbox_pointer")
+                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+            let nanbox_ptr_ref = module.declare_func_in_func(*nanbox_ptr_func, builder.func);
+            let obj_ptr_i64 = ensure_i64(builder, obj_ptr);
+            let nanbox_call = builder.ins().call(nanbox_ptr_ref, &[obj_ptr_i64]);
+            Ok(builder.inst_results(nanbox_call)[0])
         }
         Expr::IndexGet { object, index } => {
             // Handle array indexing: arr[i]

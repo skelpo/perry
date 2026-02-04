@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.84
+**Current Version:** 0.2.85
 
 ## Workflow Requirements
 
@@ -235,9 +235,31 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.83)
+## Recent Fixes (v0.2.37-0.2.85)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.85
+- Fix HTTP server handles returned as tiny floats instead of proper handles
+  - Root cause: `js_http_server_create` and `js_http_server_accept_v2` return i64 handles, but codegen was doing a raw bitcast to f64
+  - Integer 1 as i64 bits = 0x0000000000000001, interpreted as f64 = 4.94e-324 (denormalized tiny float)
+  - This caused HTTP server to not work - curl got empty replies because handles were invalid
+  - Fix: NaN-box HTTP server/request handles with POINTER_TAG using `js_nanbox_pointer`
+  - Also NaN-box HTTP string-returning functions with STRING_TAG using `js_nanbox_string`:
+    - `js_http_request_method`, `js_http_request_path`, `js_http_request_query`, `js_http_request_body`
+    - `js_http_request_content_type`, `js_http_request_header`, `js_http_request_query_param`
+    - `js_http_request_query_all`, `js_http_request_headers_all`, `js_http_respond_status_text`
+  - Before: `Server handle: 4.9e-324` (tiny float, invalid)
+  - After: `Server handle: [object Object]` (proper NaN-boxed handle)
+
+### v0.2.85
+- Fix object literals not being NaN-boxed with POINTER_TAG when passed to functions
+  - Root cause: `Expr::Object` codegen was doing raw bitcast from i64 to f64 instead of NaN-boxing
+  - This caused functions like `app.listen({ port: 3003 })` to receive invalid objects
+  - Runtime's `jsv.is_pointer()` check failed because the object had no POINTER_TAG
+  - Fix: Use `js_nanbox_pointer` to properly tag object pointers before returning
+  - Before: `Server listening on http://0.0.0.0:0` (port extraction failed)
+  - After: `Server listening on http://0.0.0.0:3003` (port correctly extracted from object)
 
 ### v0.2.83
 - Fix Cranelift verifier type mismatch errors (f64/i64 confusion)
