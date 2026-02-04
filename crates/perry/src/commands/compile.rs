@@ -787,11 +787,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     }
 
     // Propagate re-exports: when module A has `export * from "./B"`, all classes
-    // and functions exported from B should also be accessible via A's path.
+    // exported from B should also be accessible via A's path.
     // We need to iterate until no new entries are added (for chained re-exports).
+    // NOTE: We only propagate classes, not function param counts, to avoid type mismatches
+    // when functions have different signatures in different modules.
     loop {
-        let mut new_class_entries: Vec<((String, String), &perry_hir::Class)> = Vec::new();
-        let mut new_func_entries: Vec<((String, String), usize)> = Vec::new();
+        let mut new_entries: Vec<((String, String), &perry_hir::Class)> = Vec::new();
 
         for (path, hir_module) in &ctx.native_modules {
             let path_str = path.to_string_lossy().to_string();
@@ -808,18 +809,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             if src_path == &source_path_str {
                                 let key = (path_str.clone(), class_name.clone());
                                 if !exported_classes.contains_key(&key) {
-                                    new_class_entries.push((key, *class));
-                                }
-                            }
-                        }
-
-                        // Find all functions exported from the source module and add them
-                        // as also being exported from this module
-                        for ((src_path, func_name), &param_count) in &exported_func_param_counts {
-                            if src_path == &source_path_str {
-                                let key = (path_str.clone(), func_name.clone());
-                                if !exported_func_param_counts.contains_key(&key) {
-                                    new_func_entries.push((key, param_count));
+                                    new_entries.push((key, *class));
                                 }
                             }
                         }
@@ -828,15 +818,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
         }
 
-        if new_class_entries.is_empty() && new_func_entries.is_empty() {
+        if new_entries.is_empty() {
             break;
         }
 
-        for (key, class) in new_class_entries {
+        for (key, class) in new_entries {
             exported_classes.insert(key, class);
-        }
-        for (key, param_count) in new_func_entries {
-            exported_func_param_counts.insert(key, param_count);
         }
     }
 

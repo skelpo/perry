@@ -1,23 +1,15 @@
-// Debug Fastify - step by step
+// Debug Fastify - with named function handler
 import Fastify from 'fastify';
 
-console.log("Step 1: Creating app");
+function handler() {
+  return true;
+}
+
 const app = Fastify();
-console.log("Step 2: App created");
+console.log("App created");
 
-// Define a simple path
-const path = '/';
-console.log("Step 3: Path defined");
-
-// Try a very simple handler
-const handler = async () => {
-  return { ok: true };
-};
-console.log("Step 4: Handler defined");
-
-// This is where it crashes
-console.log("Step 5: About to register route");
-app.get(path, handler);
-console.log("Step 6: Route registered");
+console.log("Registering route");
+app.get('/', handler);
+console.log("Route registered");
 
 console.log("Done");
