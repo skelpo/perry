@@ -1,0 +1,99 @@
+# Docker Compose for Perry TypeScript Compiler
+#
+# This provides various development and testing scenarios:
+#
+# 1. Build Perry compiler:
+#    docker compose build perry
+#
+# 2. Compile a TypeScript file:
+#    docker compose run --rm perry /app/myfile.ts -o /app/myfile
+#
+# 3. Run tests with services (MySQL, Redis):
+#    docker compose up -d mysql redis
+#    docker compose run --rm perry-dev cargo test
+#
+# 4. Interactive development shell:
+#    docker compose run --rm perry-dev bash
+
+services:
+  # Perry compiler - use to compile .ts files to Linux binaries
+  perry:
+    build:
+      context: .
+      target: compiler
+    volumes:
+      - .:/app
+    working_dir: /app
+
+  # Development environment with full Rust toolchain
+  perry-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/perry
+      - cargo-cache:/root/.cargo/registry
+      - cargo-git:/root/.cargo/git
+      - target-cache:/perry/target
+    working_dir: /perry
+    environment:
+      - CARGO_TERM_COLOR=always
+    depends_on:
+      - mysql
+      - redis
+
+  # MySQL for testing mysql2 support
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: perry_test
+      MYSQL_DATABASE: perry_test
+      MYSQL_USER: perry
+      MYSQL_PASSWORD: perry_test
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Redis for testing ioredis support
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # PostgreSQL for testing pg support
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: perry
+      POSTGRES_PASSWORD: perry_test
+      POSTGRES_DB: perry_test
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U perry"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  cargo-cache:
+  cargo-git:
+  target-cache:
+  mysql-data:
+  redis-data:
+  postgres-data:

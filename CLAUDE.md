@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.74
+**Current Version:** 0.2.78
 
 ## Workflow Requirements
 
@@ -205,9 +205,75 @@ To test a feature, compile and run:
 cargo run --release -- test_factorial.ts && ./test_factorial
 ```
 
-## Recent Fixes (v0.2.37-0.2.74)
+## Cross-Platform Development
+
+Perry supports development on macOS with deployment to Linux via multiple methods:
+
+### GitHub Actions CI/CD (Templates)
+- `templates/github-actions/ci.yml` - Tests on Ubuntu and macOS for every push/PR
+- `templates/github-actions/release.yml` - Builds release binaries on version tags
+- Copy to `.github/workflows/` to activate
+
+### Docker Support
+- `Dockerfile` - Multi-stage build with `compiler` and `runtime` targets
+- `Dockerfile.dev` - Full development environment with Rust toolchain
+- `docker-compose.yml` - Development setup with MySQL, Redis, PostgreSQL for testing
+
+### Quick Start
+```bash
+# Build Linux binary via Docker
+docker compose run --rm perry myfile.ts -o myfile
+
+# Development with test databases
+docker compose up -d mysql redis
+docker compose run --rm perry-dev cargo test
+```
+
+See `docs/CROSS_PLATFORM.md` for detailed documentation on:
+- GitHub Actions workflows
+- Docker compilation
+- Cross-compilation with `cross`
+- Alternative approaches (Multipass, Lima, Codespaces, Nix)
+
+## Recent Fixes (v0.2.37-0.2.77)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.77
+- Add GitHub Actions CI/CD workflow templates (in `templates/github-actions/`)
+  - `ci.yml` - Tests on Ubuntu and macOS, uploads build artifacts
+  - `release.yml` - Builds release binaries for Linux x86_64, macOS x86_64/aarch64
+  - Templates are not active by default; copy to `.github/workflows/` to enable
+- Add Docker support for cross-platform development
+  - `Dockerfile` - Multi-stage build (builder, compiler, runtime stages)
+  - `Dockerfile.dev` - Development environment with full Rust toolchain
+  - `docker-compose.yml` - Dev setup with MySQL, Redis, PostgreSQL services
+  - `.dockerignore` - Excludes unnecessary files from Docker build context
+- Add cross-platform development documentation (`docs/CROSS_PLATFORM.md`)
+  - Covers GitHub Actions, Docker, cross-compilation, and alternative approaches
+
+### v0.2.76
+- Fix Error objects not displaying in console.log/console.error
+  - Added Error object formatting in `format_jsvalue()` and `format_jsvalue_for_json()` in builtins.rs
+  - Error objects now display as "Error: <message>" instead of empty/invalid output
+  - Check `OBJECT_TYPE_ERROR` tag to distinguish Error objects from regular objects/arrays
+- Fix `new Error(message)` passing corrupted message string
+  - Use `js_get_string_pointer_unified` to extract string pointer from NaN-boxed value in codegen
+- Fix console.error with multiple arguments not displaying values
+  - Added multi-argument spread support for console.error (was only implemented for console.log)
+  - console.error("prefix:", errorObj, "suffix") now works correctly
+
+### v0.2.75
+- Fix ethers.js module returning wrong values
+  - Added `getAddress()` - returns EIP-55 checksummed Ethereum addresses
+  - Added `parseEther()` - parses ether string to BigInt wei (uses 18 decimals)
+  - Added `formatEther()` - formats BigInt wei to ether string (uses 18 decimals)
+  - Fixed `parseUnits()` and `parseEther()` returning garbage values
+    - Added `is_bigint_expr` detection for NativeMethodCall returning BigInt
+    - Now properly marks local variables as `is_bigint` when assigned from ethers BigInt functions
+  - Fixed chained `toString()` on BigInt-returning ethers methods (e.g., `parseEther('1.5').toString()`)
+    - Added special handling in codegen to detect BigInt-returning NativeMethodCall and call `js_bigint_to_string`
+  - Implemented Keccak-256 hash for EIP-55 address checksumming in pure Rust
 
 ### v0.2.74
 - Fix pool.getConnection() - full support for getting connections and calling methods on them

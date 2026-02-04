@@ -1,0 +1,32 @@
+# Perry Development Dockerfile
+#
+# Full development environment with Rust toolchain for building and testing.
+# Use with docker-compose: docker compose run --rm perry-dev bash
+#
+# This image includes:
+# - Rust stable toolchain with rustfmt and clippy
+# - All build dependencies
+# - Useful development tools
+
+FROM rust:1.75-bookworm
+
+WORKDIR /perry
+
+# Install build and development dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    git \
+    curl \
+    vim \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust components
+RUN rustup component add rustfmt clippy
+
+# Set up cargo cache volume mount points
+ENV CARGO_HOME=/root/.cargo
+
+# Default command
+CMD ["bash"]

@@ -1,0 +1,31 @@
+# Build artifacts
+target/
+*.o
+*.a
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test artifacts
+test_*
+!test_*.ts
+
+# Example projects (large node_modules)
+example-code/
+private-example-code/
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Misc
+.DS_Store
+*.log
