@@ -21233,6 +21233,10 @@ fn compile_expr(
                         call_args.push(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
 
+                    // Truncate if we have too many arguments (handles variadic-like patterns)
+                    // This can happen when the function was already declared with fewer params
+                    call_args.truncate(full_param_count + 1);
+
                     let call = builder.ins().call(func_ref, &call_args);
                     return Ok(builder.inst_results(call)[0]);
                 }

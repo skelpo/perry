@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.85
+**Current Version:** 0.2.86
 
 ## Workflow Requirements
 
@@ -235,9 +235,17 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.85)
+## Recent Fixes (v0.2.37-0.2.86)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.86
+- Fix "mismatched argument count" Cranelift verifier error for cross-module function calls
+  - Root cause: When calling a wrapper function that was already declared with fewer params than the call site provided, the call_args were not truncated to match the expected signature
+  - Example: If function declared with 2 params but called with 3 args, verifier error "got 3, expected 2"
+  - This happened when functions with optional parameters were called with more args than the previously-declared signature expected
+  - Fix: Add `call_args.truncate(full_param_count + 1)` after the padding loop to ensure call_args match the wrapper signature
+  - The padding loop only added missing args (when too few) but never removed excess args (when too many)
 
 ### v0.2.85
 - Fix HTTP server handles returned as tiny floats instead of proper handles
