@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.81
+**Current Version:** 0.2.83
 
 ## Workflow Requirements
 
@@ -235,9 +235,37 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.81)
+## Recent Fixes (v0.2.37-0.2.83)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.83
+- Fix Cranelift verifier type mismatch errors (f64/i64 confusion)
+  - Root cause: Variables declared as f64 (due to is_union flag) were sometimes being updated with i64 values
+  - Variable declaration uses `is_pointer && !is_union` to determine if a variable should be i64
+  - But some code paths only checked `is_pointer` or `is_array` without checking `!is_union`
+  - Fixed locations:
+    - `this.field = value` in class setters: ensure value is f64 before calling setter
+    - ArraySplice: check `is_pointer && !is_union` when determining if variable is i64
+    - Map/Set method calls: check `(is_map || is_pointer) && !is_union` for i64 variable type
+    - Set method calls: check `(is_set || is_pointer) && !is_union` for i64 variable type
+  - This prevents "arg 0 (v4) has type f64, expected i64" and "declared type of variable doesn't match" errors
+
+### v0.2.82
+- Fix Fastify route registration causing Cranelift verifier error "arg 0 has type i32, expected i64"
+  - Root cause: Fastify route methods (`get`, `post`, etc.) return bool (i32), not Handle (i64)
+  - The NaN-boxing code was treating all fastify returns as pointers and passing i32 to `js_nanbox_pointer` which expects i64
+  - Fix: Added method-specific return type handling for fastify:
+    - Route methods (`get`, `post`, `put`, `delete`, `patch`, `head`, `options`, `all`, `route`, `addHook`, `setErrorHandler`, `register`): Convert i32 bool to f64
+    - `listen`: Returns undefined (void method)
+    - Constructor and other methods: NaN-box with POINTER_TAG as before
+  - Route registration now works correctly:
+    ```typescript
+    const app = Fastify();
+    app.get('/', () => true);           // inline arrow function
+    app.get('/api', handler);           // named function reference
+    app.get('/async', async (req, reply) => { ... }); // async handler
+    ```
 
 ### v0.2.81
 - Fix cross-module function calls via re-exports causing argument count mismatch errors

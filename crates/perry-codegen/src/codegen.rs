@@ -16084,7 +16084,8 @@ fn compile_expr(
             let info = locals.get(array_id)
                 .ok_or_else(|| anyhow!("ArraySplice: local not found"))?;
             let arr_val = builder.use_var(info.var);
-            let arr_ptr = if info.is_array || info.is_pointer {
+            // Variable is i64 only if is_pointer && !is_union (see variable declaration logic)
+            let arr_ptr = if info.is_pointer && !info.is_union {
                 arr_val // Already i64
             } else {
                 builder.ins().bitcast(types::I64, MemFlags::new(), arr_val)
@@ -16143,7 +16144,8 @@ fn compile_expr(
 
             // Load the updated array pointer from out_arr and update local
             let new_arr_ptr = builder.ins().load(types::I64, MemFlags::new(), out_arr_addr, 0);
-            if info.is_array || info.is_pointer {
+            // Variable is i64 only if is_pointer && !is_union (see variable declaration logic)
+            if info.is_pointer && !info.is_union {
                 builder.def_var(info.var, new_arr_ptr);
             } else {
                 let new_arr_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr);
@@ -16414,7 +16416,8 @@ fn compile_expr(
             // Compile the map expression - similar to MapGet handling
             let map_ptr = if let Expr::LocalGet(id) = map.as_ref() {
                 if let Some(info) = locals.get(id) {
-                    if info.is_map || info.is_pointer {
+                    // Variable is i64 only if (is_map || is_pointer) && !is_union
+                    if (info.is_map || info.is_pointer) && !info.is_union {
                         builder.use_var(info.var)
                     } else {
                         let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
@@ -16449,7 +16452,7 @@ fn compile_expr(
             // Get map pointer - if it's a local map variable, use directly as i64
             let map_ptr = if let Expr::LocalGet(id) = map.as_ref() {
                 if let Some(info) = locals.get(id) {
-                    if info.is_map || info.is_pointer {
+                    if (info.is_map || info.is_pointer) && !info.is_union {
                         builder.use_var(info.var)
                     } else {
                         let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
@@ -16477,7 +16480,7 @@ fn compile_expr(
             // Get map pointer - if it's a local map variable, use directly as i64
             let map_ptr = if let Expr::LocalGet(id) = map.as_ref() {
                 if let Some(info) = locals.get(id) {
-                    if info.is_map || info.is_pointer {
+                    if (info.is_map || info.is_pointer) && !info.is_union {
                         builder.use_var(info.var)
                     } else {
                         let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
@@ -16506,7 +16509,7 @@ fn compile_expr(
             // Get map pointer - if it's a local map variable, use directly as i64
             let map_ptr = if let Expr::LocalGet(id) = map.as_ref() {
                 if let Some(info) = locals.get(id) {
-                    if info.is_map || info.is_pointer {
+                    if (info.is_map || info.is_pointer) && !info.is_union {
                         builder.use_var(info.var)
                     } else {
                         let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
@@ -16535,7 +16538,7 @@ fn compile_expr(
             // Get map pointer - if it's a local map variable, use directly as i64
             let map_ptr = if let Expr::LocalGet(id) = map.as_ref() {
                 if let Some(info) = locals.get(id) {
-                    if info.is_map || info.is_pointer {
+                    if (info.is_map || info.is_pointer) && !info.is_union {
                         builder.use_var(info.var)
                     } else {
                         let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
@@ -16562,7 +16565,7 @@ fn compile_expr(
             // Get map pointer - if it's a local map variable, use directly as i64
             let map_ptr = if let Expr::LocalGet(id) = map.as_ref() {
                 if let Some(info) = locals.get(id) {
-                    if info.is_map || info.is_pointer {
+                    if (info.is_map || info.is_pointer) && !info.is_union {
                         builder.use_var(info.var)
                     } else {
                         let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
@@ -16647,7 +16650,7 @@ fn compile_expr(
             // Get set pointer - if it's a local set variable, use directly as i64
             let set_ptr = if let Expr::LocalGet(id) = set.as_ref() {
                 if let Some(info) = locals.get(id) {
-                    if info.is_set || info.is_pointer {
+                    if (info.is_set || info.is_pointer) && !info.is_union {
                         builder.use_var(info.var)
                     } else {
                         let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
@@ -16695,7 +16698,7 @@ fn compile_expr(
             // Get set pointer - if it's a local set variable, use directly as i64
             let set_ptr = if let Expr::LocalGet(id) = set.as_ref() {
                 if let Some(info) = locals.get(id) {
-                    if info.is_set || info.is_pointer {
+                    if (info.is_set || info.is_pointer) && !info.is_union {
                         builder.use_var(info.var)
                     } else {
                         let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
@@ -16743,7 +16746,7 @@ fn compile_expr(
             // Get set pointer - if it's a local set variable, use directly as i64
             let set_ptr = if let Expr::LocalGet(id) = set.as_ref() {
                 if let Some(info) = locals.get(id) {
-                    if info.is_set || info.is_pointer {
+                    if (info.is_set || info.is_pointer) && !info.is_union {
                         builder.use_var(info.var)
                     } else {
                         let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
@@ -16770,7 +16773,7 @@ fn compile_expr(
             // Get set pointer - if it's a local set variable, use directly as i64
             let set_ptr = if let Expr::LocalGet(id) = set.as_ref() {
                 if let Some(info) = locals.get(id) {
-                    if info.is_set || info.is_pointer {
+                    if (info.is_set || info.is_pointer) && !info.is_union {
                         builder.use_var(info.var)
                     } else {
                         let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
@@ -22714,9 +22717,11 @@ fn compile_expr(
                     if let Some(&setter_id) = ctx.class_meta.setter_ids.get(property) {
                         let obj_ptr = builder.use_var(ctx.this_var);
                         let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+                        // Ensure val is f64 before the call (setter expects i64 this, f64 value)
+                        let val_f64 = ensure_f64(builder, val);
 
                         let func_ref = module.declare_func_in_func(setter_id, builder.func);
-                        builder.ins().call(func_ref, &[obj_ptr, val]);
+                        builder.ins().call(func_ref, &[obj_ptr, val_f64]);
 
                         return Ok(val);
                     }
@@ -26170,13 +26175,41 @@ fn compile_expr(
                           native_module == "events" || native_module == "lru-cache" ||
                           native_module == "commander" ||
                           native_module == "decimal.js" || native_module == "big.js" ||
-                          native_module == "bignumber.js" || native_module == "fastify" {
+                          native_module == "bignumber.js" {
                     // These modules return object pointers - NaN-box with POINTER_TAG
                     let nanbox_func = extern_funcs.get("js_nanbox_pointer")
                         .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
                     let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
                     let call = builder.ins().call(nanbox_ref, &[result]);
                     Ok(builder.inst_results(call)[0])
+                } else if native_module == "fastify" {
+                    // Fastify methods have mixed return types:
+                    // - Constructor (default): returns Handle (i64) - needs NaN-boxing
+                    // - Route methods (get, post, etc.): return bool (i32) - convert to f64
+                    // - listen: returns void
+                    // - Other methods: may return Handle for chaining
+                    match method.as_str() {
+                        // Route methods return bool (i32)
+                        "get" | "post" | "put" | "delete" | "patch" | "head" | "options" | "all" | "route" |
+                        "addHook" | "setErrorHandler" | "register" => {
+                            // Convert i32 bool to f64 (0.0 or 1.0)
+                            let result_i64 = builder.ins().uextend(types::I64, result);
+                            Ok(builder.ins().fcvt_from_sint(types::F64, result_i64))
+                        }
+                        "listen" => {
+                            // listen returns void, return undefined
+                            const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                            Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
+                        }
+                        _ => {
+                            // Constructor (default) and other methods return Handle (i64) - NaN-box
+                            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                            let call = builder.ins().call(nanbox_ref, &[result]);
+                            Ok(builder.inst_results(call)[0])
+                        }
+                    }
                 } else {
                     // Other functions return pointers (i64) - convert to f64 for NaN-boxing ABI
                     Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))

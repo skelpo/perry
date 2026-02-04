@@ -922,6 +922,17 @@ fn lower_module_decl(
                                             }
                                         }
                                     }
+
+                                    // Check if this is a direct call to a default import from a native module
+                                    // e.g., Fastify() where Fastify is imported from 'fastify'
+                                    if let ast::Expr::Ident(func_ident) = callee.as_ref() {
+                                        let func_name = func_ident.sym.as_ref();
+                                        // Check if this is a default import from a native module
+                                        if let Some((module_name, None)) = ctx.lookup_native_module(func_name) {
+                                            // Register as native instance - the "class" is the module name for default exports
+                                            ctx.register_native_instance(name.clone(), module_name.to_string(), "App".to_string());
+                                        }
+                                    }
                                 }
                             }
 
@@ -6539,6 +6550,17 @@ fn lower_var_decl_with_destructuring(
                                         }
                                     }
                                 }
+                            }
+                        }
+
+                        // Check if this is a direct call to a default import from a native module
+                        // e.g., Fastify() where Fastify is imported from 'fastify'
+                        if let ast::Expr::Ident(func_ident) = callee.as_ref() {
+                            let func_name = func_ident.sym.as_ref();
+                            // Check if this is a default import from a native module
+                            if let Some((module_name, None)) = ctx.lookup_native_module(func_name) {
+                                // Register as native instance - the "class" is "App" for default exports
+                                ctx.register_native_instance(name.clone(), module_name.to_string(), "App".to_string());
                             }
                         }
                     }
