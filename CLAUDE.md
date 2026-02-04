@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.78
+**Current Version:** 0.2.79
 
 ## Workflow Requirements
 
@@ -235,9 +235,35 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.77)
+## Recent Fixes (v0.2.37-0.2.78)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.79
+- Add Fastify-compatible native HTTP framework
+  - New module: `crates/perry-stdlib/src/fastify/` with Fastify-like API
+  - `mod.rs` - Core data structures (FastifyApp, Route, Hooks, RoutePattern)
+  - `router.rs` - Route pattern parsing and matching (supports `:param` and `*` wildcard)
+  - `context.rs` - Unified context for Fastify and Hono style handlers
+  - `app.rs` - Route registration, hooks, plugins
+  - `server.rs` - Hyper-based server with event loop
+  - FFI functions for route handlers, request/response context
+  - Supports: GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS routes
+  - Supports: Lifecycle hooks (onRequest, preHandler, etc.)
+  - Supports: Plugins with URL prefix
+  - Supports: Hono-style context methods (c.json(), c.text(), c.req.param())
+  - Re-exported promise functions (js_promise_run_microtasks, js_promise_state, js_is_promise) for stdlib
+  - **Note**: Full codegen integration pending - runtime is complete
+
+### v0.2.78
+- Fix cross-module function calls with optional parameters causing signature mismatch errors
+  - Functions with optional parameters can now be called with different argument counts from other modules
+  - Example: `executeQuery(query, params?, options?)` can be called as `executeQuery('SELECT 1')`,
+    `executeQuery('SELECT ?', [42])`, or `executeQuery('SELECT ?', [42], { timeout: 1000 })`
+  - Root cause: wrapper functions were being declared with call-site arity instead of full function signature
+  - Fix: Added `imported_func_param_counts` map to propagate function param counts between modules during compilation
+  - When calling with fewer args than params, missing arguments are padded with `undefined`
+  - Also added fallback: if wrapper is already declared with different signature, find existing declaration and adapt
 
 ### v0.2.77
 - Add GitHub Actions CI/CD workflow templates (in `templates/github-actions/`)

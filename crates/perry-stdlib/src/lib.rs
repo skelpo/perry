@@ -44,6 +44,12 @@ pub mod framework;
 #[cfg(feature = "http-server")]
 pub use framework::*;
 
+// === Fastify-Compatible Framework ===
+#[cfg(feature = "http-server")]
+pub mod fastify;
+#[cfg(feature = "http-server")]
+pub use fastify::*;
+
 // === HTTP Client ===
 #[cfg(feature = "http-client")]
 pub mod fetch;

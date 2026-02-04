@@ -277,35 +277,69 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             if ptr.is_null() {
                 "null".to_string()
             } else {
-                // First check if this looks like an array by examining ArrayHeader fields
-                // ArrayHeader has length (u32) and capacity (u32), so check if they look valid
-                let maybe_arr = ptr;
-                let length = (*maybe_arr).length as usize;
-                let capacity = (*maybe_arr).capacity as usize;
+                // First check if this is an Error object by checking the object_type field
+                // Both ObjectHeader and ErrorHeader have object_type as the first u32 field
+                let object_type = *(ptr as *const u32);
+                if object_type == crate::error::OBJECT_TYPE_ERROR {
+                    // This is an Error object - format as "Error: <message>"
+                    let error_ptr = ptr as *const crate::error::ErrorHeader;
+                    let name_ptr = (*error_ptr).name;
+                    let message_ptr = (*error_ptr).message;
 
-                // Heuristic: if capacity >= length and both are reasonable, it's likely an array
-                if capacity >= length && length < 1_000_000 && capacity < 10_000_000
-                    && capacity > 0 // arrays have non-zero capacity
-                {
-                    // Format as array
-                    let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
-                    let mut parts: Vec<String> = Vec::with_capacity(length);
-                    for i in 0..length {
-                        let elem_value = *data_ptr.add(i);
-                        parts.push(format_jsvalue(elem_value, depth + 1));
-                    }
-                    format!("[{}]", parts.join(", "))
-                } else {
-                    // Try to check if it's an object with keys_array
-                    let obj_ptr = ptr as *const crate::object::ObjectHeader;
-                    let keys_array = (*obj_ptr).keys_array;
-
-                    if !keys_array.is_null() {
-                        // This is an object with keys - format as JSON
-                        format_object_as_json(obj_ptr, depth)
+                    let name_str = if name_ptr.is_null() {
+                        "Error".to_string()
                     } else {
-                        // Class instance without keys_array
-                        "[object Object]".to_string()
+                        let len = (*name_ptr).length as usize;
+                        let data = (name_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                        let bytes = std::slice::from_raw_parts(data, len);
+                        std::str::from_utf8(bytes).unwrap_or("Error").to_string()
+                    };
+
+                    let message_str = if message_ptr.is_null() {
+                        "".to_string()
+                    } else {
+                        let len = (*message_ptr).length as usize;
+                        let data = (message_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                        let bytes = std::slice::from_raw_parts(data, len);
+                        std::str::from_utf8(bytes).unwrap_or("").to_string()
+                    };
+
+                    if message_str.is_empty() {
+                        name_str
+                    } else {
+                        format!("{}: {}", name_str, message_str)
+                    }
+                } else {
+                    // Check if this looks like an array by examining ArrayHeader fields
+                    // ArrayHeader has length (u32) and capacity (u32), so check if they look valid
+                    let maybe_arr = ptr;
+                    let length = (*maybe_arr).length as usize;
+                    let capacity = (*maybe_arr).capacity as usize;
+
+                    // Heuristic: if capacity >= length and both are reasonable, it's likely an array
+                    if capacity >= length && length < 1_000_000 && capacity < 10_000_000
+                        && capacity > 0 // arrays have non-zero capacity
+                    {
+                        // Format as array
+                        let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
+                        let mut parts: Vec<String> = Vec::with_capacity(length);
+                        for i in 0..length {
+                            let elem_value = *data_ptr.add(i);
+                            parts.push(format_jsvalue(elem_value, depth + 1));
+                        }
+                        format!("[{}]", parts.join(", "))
+                    } else {
+                        // Try to check if it's an object with keys_array
+                        let obj_ptr = ptr as *const crate::object::ObjectHeader;
+                        let keys_array = (*obj_ptr).keys_array;
+
+                        if !keys_array.is_null() {
+                            // This is an object with keys - format as JSON
+                            format_object_as_json(obj_ptr, depth)
+                        } else {
+                            // Class instance without keys_array
+                            "[object Object]".to_string()
+                        }
                     }
                 }
             }
@@ -420,28 +454,61 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
             if ptr.is_null() {
                 "null".to_string()
             } else {
-                // Check if it's an object with keys
-                let obj_ptr = ptr as *const crate::object::ObjectHeader;
-                let keys_array = (*obj_ptr).keys_array;
+                // First check if this is an Error object
+                let object_type = *(ptr as *const u32);
+                if object_type == crate::error::OBJECT_TYPE_ERROR {
+                    // Format Error as "Error: <message>"
+                    let error_ptr = ptr as *const crate::error::ErrorHeader;
+                    let name_ptr = (*error_ptr).name;
+                    let message_ptr = (*error_ptr).message;
 
-                if !keys_array.is_null() {
-                    format_object_as_json(obj_ptr, depth)
-                } else {
-                    // Check if array
-                    let maybe_arr = ptr;
-                    let length = (*maybe_arr).length as usize;
-                    let capacity = (*maybe_arr).capacity as usize;
-
-                    if capacity >= length && length < 1_000_000 && capacity < 10_000_000 {
-                        let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
-                        let mut parts: Vec<String> = Vec::with_capacity(length);
-                        for i in 0..length {
-                            let elem_value = *data_ptr.add(i);
-                            parts.push(format_jsvalue_for_json(elem_value, depth + 1));
-                        }
-                        format!("[{}]", parts.join(", "))
+                    let name_str = if name_ptr.is_null() {
+                        "Error".to_string()
                     } else {
-                        "[object Object]".to_string()
+                        let len = (*name_ptr).length as usize;
+                        let data = (name_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                        let bytes = std::slice::from_raw_parts(data, len);
+                        std::str::from_utf8(bytes).unwrap_or("Error").to_string()
+                    };
+
+                    let message_str = if message_ptr.is_null() {
+                        "".to_string()
+                    } else {
+                        let len = (*message_ptr).length as usize;
+                        let data = (message_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                        let bytes = std::slice::from_raw_parts(data, len);
+                        std::str::from_utf8(bytes).unwrap_or("").to_string()
+                    };
+
+                    if message_str.is_empty() {
+                        name_str
+                    } else {
+                        format!("{}: {}", name_str, message_str)
+                    }
+                } else {
+                    // Check if it's an object with keys
+                    let obj_ptr = ptr as *const crate::object::ObjectHeader;
+                    let keys_array = (*obj_ptr).keys_array;
+
+                    if !keys_array.is_null() {
+                        format_object_as_json(obj_ptr, depth)
+                    } else {
+                        // Check if array
+                        let maybe_arr = ptr;
+                        let length = (*maybe_arr).length as usize;
+                        let capacity = (*maybe_arr).capacity as usize;
+
+                        if capacity >= length && length < 1_000_000 && capacity < 10_000_000 {
+                            let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
+                            let mut parts: Vec<String> = Vec::with_capacity(length);
+                            for i in 0..length {
+                                let elem_value = *data_ptr.add(i);
+                                parts.push(format_jsvalue_for_json(elem_value, depth + 1));
+                            }
+                            format!("[{}]", parts.join(", "))
+                        } else {
+                            "[object Object]".to_string()
+                        }
                     }
                 }
             }

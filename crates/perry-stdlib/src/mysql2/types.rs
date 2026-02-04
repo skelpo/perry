@@ -2,7 +2,7 @@
 
 use perry_runtime::{
     js_array_alloc, js_array_push,
-    js_object_alloc, js_object_get_field, js_object_set_field, js_object_set_keys,
+    js_object_alloc, js_object_get_field, js_object_get_field_by_name, js_object_set_field, js_object_set_keys,
     js_string_from_bytes, JSValue, ObjectHeader, StringHeader,
 };
 use sqlx::mysql::MySqlRow;
@@ -70,6 +70,11 @@ unsafe fn jsvalue_to_string(value: JSValue) -> Option<String> {
     None
 }
 
+/// Helper to create a string key for field lookup
+unsafe fn make_key(s: &str) -> *const StringHeader {
+    js_string_from_bytes(s.as_ptr(), s.len() as u32)
+}
+
 /// Convert a JSValue config object to MySqlConfig
 ///
 /// Supports two formats:
@@ -91,52 +96,46 @@ pub unsafe fn parse_mysql_config(config: JSValue) -> MySqlConfig {
         return result;
     }
 
-    // Try to get the URI field by checking each field
-    // The object might have fields in different orders depending on how it was created
-    let field_count = (*obj_ptr).field_count;
-
-    for i in 0..field_count {
-        let field = js_object_get_field(obj_ptr, i);
-
-        if let Some(field_str) = jsvalue_to_string(field) {
-            if field_str.starts_with("mysql://") {
-                // Found the URI
-                if let Some(parsed) = parse_mysql_uri(&field_str) {
-                    return parsed;
-                }
-            }
+    // Try to get the URI field first
+    let uri_key = make_key("uri");
+    let uri_val = js_object_get_field_by_name(obj_ptr, uri_key);
+    if let Some(uri_str) = jsvalue_to_string(uri_val) {
+        if let Some(parsed) = parse_mysql_uri(&uri_str) {
+            return parsed;
         }
     }
 
-    // If no URI found, fall back to individual fields
-    let first_field = js_object_get_field(obj_ptr, 0);
-    if let Some(host_str) = jsvalue_to_string(first_field) {
-        if !host_str.starts_with("mysql://") {
-            // It's the host field (old format)
-            result.host = host_str;
-        }
+    // Extract host by name
+    let host_key = make_key("host");
+    let host_val = js_object_get_field_by_name(obj_ptr, host_key);
+    if let Some(host) = jsvalue_to_string(host_val) {
+        result.host = host;
     }
 
-    // Extract port (field 1)
-    let port_val = js_object_get_field(obj_ptr, 1);
+    // Extract port by name
+    let port_key = make_key("port");
+    let port_val = js_object_get_field_by_name(obj_ptr, port_key);
     if port_val.is_number() {
         result.port = port_val.to_number() as u16;
     }
 
-    // Extract user (field 2)
-    let user_val = js_object_get_field(obj_ptr, 2);
+    // Extract user by name
+    let user_key = make_key("user");
+    let user_val = js_object_get_field_by_name(obj_ptr, user_key);
     if let Some(user) = jsvalue_to_string(user_val) {
         result.user = user;
     }
 
-    // Extract password (field 3)
-    let password_val = js_object_get_field(obj_ptr, 3);
+    // Extract password by name
+    let password_key = make_key("password");
+    let password_val = js_object_get_field_by_name(obj_ptr, password_key);
     if let Some(password) = jsvalue_to_string(password_val) {
         result.password = password;
     }
 
-    // Extract database (field 4, optional)
-    let database_val = js_object_get_field(obj_ptr, 4);
+    // Extract database by name (optional)
+    let database_key = make_key("database");
+    let database_val = js_object_get_field_by_name(obj_ptr, database_key);
     if !database_val.is_undefined() && !database_val.is_null() {
         if let Some(database) = jsvalue_to_string(database_val) {
             result.database = Some(database);

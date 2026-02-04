@@ -773,6 +773,19 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
+    // Build a map of all exported functions with their param counts from all modules
+    // Key: (resolved_path, func_name) -> param_count
+    // This is needed to ensure consistent wrapper signatures for functions with optional params
+    let mut exported_func_param_counts: HashMap<(String, String), usize> = HashMap::new();
+    for (path, hir_module) in &ctx.native_modules {
+        let path_str = path.to_string_lossy().to_string();
+        for func in &hir_module.functions {
+            if func.is_exported {
+                exported_func_param_counts.insert((path_str.clone(), func.name.clone()), func.params.len());
+            }
+        }
+    }
+
     // Propagate re-exports: when module A has `export * from "./B"`, all classes
     // exported from B should also be accessible via A's path.
     // We need to iterate until no new entries are added (for chained re-exports).
@@ -856,11 +869,17 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 };
 
                 // Check if this import is a class from another module
-                let key = (resolved_path.clone(), exported_name);
+                let key = (resolved_path.clone(), exported_name.clone());
                 if let Some(class) = exported_classes.get(&key) {
                     // Register this class as an import in the current compiler
                     // Pass the local_name as an alias so the class can be found when used with that name
                     compiler.register_imported_class(class, Some(&local_name))?;
+                }
+
+                // Check if this import is a function from another module
+                // Register its param count so wrapper signatures are consistent
+                if let Some(&param_count) = exported_func_param_counts.get(&key) {
+                    compiler.register_imported_func_param_count(exported_name, param_count);
                 }
             }
         }

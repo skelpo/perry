@@ -1,8 +1,205 @@
 //! ethers.js utilities
 //!
-//! Provides formatUnits and parseUnits for BigInt/decimal conversion.
+//! Provides formatUnits, parseUnits, parseEther, formatEther, getAddress, and other ethers utilities.
 
 use perry_runtime::{js_string_from_bytes, js_bigint_from_string, BigIntHeader, StringHeader};
+
+/// getAddress(address: string) -> string
+/// Returns the checksummed address (EIP-55 format).
+/// Example: getAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48") -> "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+#[no_mangle]
+pub extern "C" fn js_ethers_get_address(str_ptr: *const StringHeader) -> *mut StringHeader {
+    if str_ptr.is_null() {
+        let s = "0x0000000000000000000000000000000000000000";
+        return js_string_from_bytes(s.as_ptr(), s.len() as u32);
+    }
+
+    unsafe {
+        let len = (*str_ptr).length as usize;
+        let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+        let bytes = std::slice::from_raw_parts(data, len);
+
+        if let Ok(s) = std::str::from_utf8(bytes) {
+            let checksummed = to_checksum_address(s.trim());
+            js_string_from_bytes(checksummed.as_ptr(), checksummed.len() as u32)
+        } else {
+            let s = "0x0000000000000000000000000000000000000000";
+            js_string_from_bytes(s.as_ptr(), s.len() as u32)
+        }
+    }
+}
+
+/// parseEther(value: string) -> bigint
+/// Parses a string representing ether to a BigInt in wei (18 decimals).
+/// Example: parseEther("1.5") -> 1500000000000000000n
+#[no_mangle]
+pub extern "C" fn js_ethers_parse_ether(str_ptr: *const StringHeader) -> *mut BigIntHeader {
+    // parseEther is just parseUnits with 18 decimals
+    js_ethers_parse_units(str_ptr, 18.0)
+}
+
+/// formatEther(value: bigint) -> string
+/// Formats a BigInt in wei to a string in ether (18 decimals).
+/// Example: formatEther(1500000000000000000n) -> "1.5"
+#[no_mangle]
+pub extern "C" fn js_ethers_format_ether(bigint_ptr: *const BigIntHeader) -> *mut StringHeader {
+    // formatEther is just formatUnits with 18 decimals
+    js_ethers_format_units(bigint_ptr, 18.0)
+}
+
+/// Convert an Ethereum address to EIP-55 checksum format
+fn to_checksum_address(address: &str) -> String {
+    // Remove 0x prefix if present
+    let addr = address.strip_prefix("0x").unwrap_or(address);
+    let addr = addr.strip_prefix("0X").unwrap_or(addr);
+
+    // Validate length
+    if addr.len() != 40 {
+        return format!("0x{}", addr.to_lowercase());
+    }
+
+    // Validate hex characters
+    if !addr.chars().all(|c| c.is_ascii_hexdigit()) {
+        return format!("0x{}", addr.to_lowercase());
+    }
+
+    // Lowercase for hashing
+    let addr_lower = addr.to_lowercase();
+
+    // Calculate keccak256 hash of lowercase address
+    let hash = keccak256(addr_lower.as_bytes());
+
+    // Apply checksum
+    let mut result = String::with_capacity(42);
+    result.push_str("0x");
+
+    for (i, c) in addr_lower.chars().enumerate() {
+        if c.is_ascii_digit() {
+            result.push(c);
+        } else {
+            // Get the nibble from the hash at position i
+            let hash_byte = hash[i / 2];
+            let hash_nibble = if i % 2 == 0 {
+                (hash_byte >> 4) & 0x0F
+            } else {
+                hash_byte & 0x0F
+            };
+
+            // If hash nibble >= 8, uppercase the character
+            if hash_nibble >= 8 {
+                result.push(c.to_ascii_uppercase());
+            } else {
+                result.push(c);
+            }
+        }
+    }
+
+    result
+}
+
+/// Simple keccak256 implementation for address checksums
+/// This is a minimal implementation specifically for 40-byte hex addresses
+fn keccak256(data: &[u8]) -> [u8; 32] {
+    use core::convert::TryInto;
+
+    // Keccak-256 constants
+    const ROUNDS: usize = 24;
+    const RC: [u64; 24] = [
+        0x0000000000000001, 0x0000000000008082, 0x800000000000808a,
+        0x8000000080008000, 0x000000000000808b, 0x0000000080000001,
+        0x8000000080008081, 0x8000000000008009, 0x000000000000008a,
+        0x0000000000000088, 0x0000000080008009, 0x000000008000000a,
+        0x000000008000808b, 0x800000000000008b, 0x8000000000008089,
+        0x8000000000008003, 0x8000000000008002, 0x8000000000000080,
+        0x000000000000800a, 0x800000008000000a, 0x8000000080008081,
+        0x8000000000008080, 0x0000000080000001, 0x8000000080008008,
+    ];
+
+    const ROTC: [u32; 24] = [
+        1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14,
+        27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44,
+    ];
+
+    const PILN: [usize; 24] = [
+        10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4,
+        15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1,
+    ];
+
+    fn keccak_f(state: &mut [u64; 25]) {
+        for round in 0..ROUNDS {
+            // Theta
+            let mut bc = [0u64; 5];
+            for i in 0..5 {
+                bc[i] = state[i] ^ state[i + 5] ^ state[i + 10] ^ state[i + 15] ^ state[i + 20];
+            }
+            for i in 0..5 {
+                let t = bc[(i + 4) % 5] ^ bc[(i + 1) % 5].rotate_left(1);
+                for j in (0..25).step_by(5) {
+                    state[j + i] ^= t;
+                }
+            }
+
+            // Rho and Pi
+            let mut t = state[1];
+            for i in 0..24 {
+                let j = PILN[i];
+                let temp = state[j];
+                state[j] = t.rotate_left(ROTC[i]);
+                t = temp;
+            }
+
+            // Chi
+            for j in (0..25).step_by(5) {
+                let mut bc = [0u64; 5];
+                for i in 0..5 {
+                    bc[i] = state[j + i];
+                }
+                for i in 0..5 {
+                    state[j + i] ^= (!bc[(i + 1) % 5]) & bc[(i + 2) % 5];
+                }
+            }
+
+            // Iota
+            state[0] ^= RC[round];
+        }
+    }
+
+    // Initialize state
+    let mut state = [0u64; 25];
+
+    // Keccak-256 rate: 1088 bits = 136 bytes
+    let rate = 136;
+
+    // Pad the message (Keccak padding: 0x01 ... 0x80)
+    let mut padded = data.to_vec();
+    padded.push(0x01);
+    while padded.len() % rate != rate - 1 {
+        padded.push(0x00);
+    }
+    padded.push(0x80);
+
+    // Absorb
+    for chunk in padded.chunks(rate) {
+        for (i, block) in chunk.chunks(8).enumerate() {
+            if block.len() == 8 {
+                state[i] ^= u64::from_le_bytes(block.try_into().unwrap());
+            } else {
+                let mut bytes = [0u8; 8];
+                bytes[..block.len()].copy_from_slice(block);
+                state[i] ^= u64::from_le_bytes(bytes);
+            }
+        }
+        keccak_f(&mut state);
+    }
+
+    // Squeeze (only need 256 bits = 32 bytes)
+    let mut output = [0u8; 32];
+    for (i, chunk) in output.chunks_mut(8).enumerate() {
+        chunk.copy_from_slice(&state[i].to_le_bytes());
+    }
+
+    output
+}
 
 /// formatUnits(value: bigint, decimals: number) -> string
 /// Converts a BigInt to a human-readable string with the given number of decimals.
