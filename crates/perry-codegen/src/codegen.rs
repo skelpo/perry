@@ -515,16 +515,55 @@ impl Compiler {
     /// Create global data slots for module-level variables
     /// These allow functions to access variables defined in init statements
     fn create_module_var_globals(&mut self, init_stmts: &[Stmt]) -> Result<()> {
-        for stmt in init_stmts {
-            if let Stmt::Let { id, name, .. } = stmt {
-                // Create a global data slot for this variable
-                // Each slot holds an f64 (8 bytes)
-                let global_name = format!("__modvar_{}_{}", name, id);
-                let data_id = self.module.declare_data(&global_name, Linkage::Local, true, false)?;
-                let mut data_desc = DataDescription::new();
-                data_desc.define_zeroinit(8); // 8 bytes for f64
-                self.module.define_data(data_id, &data_desc)?;
-                self.module_var_data_ids.insert(*id, data_id);
+        self.create_module_var_globals_recursive(init_stmts)
+    }
+
+    /// Recursively create globals for variables in nested statements (for loops, if blocks, etc.)
+    fn create_module_var_globals_recursive(&mut self, stmts: &[Stmt]) -> Result<()> {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Let { id, name, .. } => {
+                    // Create a global data slot for this variable
+                    // Each slot holds an f64 (8 bytes)
+                    let global_name = format!("__modvar_{}_{}", name, id);
+                    let data_id = self.module.declare_data(&global_name, Linkage::Local, true, false)?;
+                    let mut data_desc = DataDescription::new();
+                    data_desc.define_zeroinit(8); // 8 bytes for f64
+                    self.module.define_data(data_id, &data_desc)?;
+                    self.module_var_data_ids.insert(*id, data_id);
+                }
+                Stmt::For { init, body, .. } => {
+                    // Walk init statement if present
+                    if let Some(init_stmt) = init {
+                        self.create_module_var_globals_recursive(&[*init_stmt.clone()])?;
+                    }
+                    // Walk body statements
+                    self.create_module_var_globals_recursive(body)?;
+                }
+                Stmt::While { body, .. } => {
+                    self.create_module_var_globals_recursive(body)?;
+                }
+                Stmt::If { then_branch, else_branch, .. } => {
+                    self.create_module_var_globals_recursive(then_branch)?;
+                    if let Some(else_stmts) = else_branch {
+                        self.create_module_var_globals_recursive(else_stmts)?;
+                    }
+                }
+                Stmt::Try { body, catch, finally } => {
+                    self.create_module_var_globals_recursive(body)?;
+                    if let Some(c) = catch {
+                        self.create_module_var_globals_recursive(&c.body)?;
+                    }
+                    if let Some(f) = finally {
+                        self.create_module_var_globals_recursive(f)?;
+                    }
+                }
+                Stmt::Switch { cases, .. } => {
+                    for case in cases {
+                        self.create_module_var_globals_recursive(&case.body)?;
+                    }
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -533,10 +572,45 @@ impl Compiler {
     /// Analyze module-level variable types from init statements
     /// This is needed before compile_function to know the types for loading from global slots
     fn analyze_module_var_types(&mut self, init_stmts: &[Stmt]) {
+        self.analyze_module_var_types_recursive(init_stmts);
+    }
+
+    /// Recursively analyze variable types in nested statements
+    fn analyze_module_var_types_recursive(&mut self, stmts: &[Stmt]) {
         use perry_types::Type as HirType;
 
-        for stmt in init_stmts {
-            if let Stmt::Let { id, name, ty, init, .. } = stmt {
+        for stmt in stmts {
+            match stmt {
+                Stmt::For { init, body, .. } => {
+                    if let Some(init_stmt) = init {
+                        self.analyze_module_var_types_recursive(&[*init_stmt.clone()]);
+                    }
+                    self.analyze_module_var_types_recursive(body);
+                }
+                Stmt::While { body, .. } => {
+                    self.analyze_module_var_types_recursive(body);
+                }
+                Stmt::If { then_branch, else_branch, .. } => {
+                    self.analyze_module_var_types_recursive(then_branch);
+                    if let Some(else_stmts) = else_branch {
+                        self.analyze_module_var_types_recursive(else_stmts);
+                    }
+                }
+                Stmt::Try { body, catch, finally } => {
+                    self.analyze_module_var_types_recursive(body);
+                    if let Some(c) = catch {
+                        self.analyze_module_var_types_recursive(&c.body);
+                    }
+                    if let Some(f) = finally {
+                        self.analyze_module_var_types_recursive(f);
+                    }
+                }
+                Stmt::Switch { cases, .. } => {
+                    for case in cases {
+                        self.analyze_module_var_types_recursive(&case.body);
+                    }
+                }
+                Stmt::Let { id, name, ty, init, .. } => {
                 // Determine if this variable is a pointer type
                 // Note: String is NOT included because strings are now NaN-boxed (f64 values)
                 let is_pointer = matches!(ty, HirType::Array(_) |
@@ -630,6 +704,8 @@ impl Compiler {
                     product_cache: None,
                 };
                 self.module_level_locals.insert(*id, info);
+                }
+                _ => {}
             }
         }
     }
@@ -1318,7 +1394,11 @@ impl Compiler {
             builder.finalize();
         }
 
-        self.module.define_function(func_id, &mut self.ctx)?;
+        if let Err(e) = self.module.define_function(func_id, &mut self.ctx) {
+            eprintln!("=== VERIFIER ERROR in instance method '{}' ===", method.name);
+            eprintln!("Error: {}", e);
+            return Err(anyhow!("Error compiling instance method '{}': {}", method.name, e));
+        }
         self.module.clear_context(&mut self.ctx);
 
         Ok(())
@@ -1547,7 +1627,11 @@ impl Compiler {
             builder.finalize();
         }
 
-        self.module.define_function(func_id, &mut self.ctx)?;
+        if let Err(e) = self.module.define_function(func_id, &mut self.ctx) {
+            eprintln!("=== VERIFIER ERROR in getter '{}::get_{}' ===", class.name, prop_name);
+            eprintln!("Error: {}", e);
+            return Err(anyhow!("Error compiling getter '{}::get_{}': {}", class.name, prop_name, e));
+        }
         self.module.clear_context(&mut self.ctx);
 
         Ok(())
@@ -1709,7 +1793,11 @@ impl Compiler {
             builder.finalize();
         }
 
-        self.module.define_function(func_id, &mut self.ctx)?;
+        if let Err(e) = self.module.define_function(func_id, &mut self.ctx) {
+            eprintln!("=== VERIFIER ERROR in setter '{}::set_{}' ===", class.name, prop_name);
+            eprintln!("Error: {}", e);
+            return Err(anyhow!("Error compiling setter '{}::set_{}': {}", class.name, prop_name, e));
+        }
         self.module.clear_context(&mut self.ctx);
 
         Ok(())
@@ -1890,7 +1978,11 @@ impl Compiler {
             builder.finalize();
         }
 
-        self.module.define_function(func_id, &mut self.ctx)?;
+        if let Err(e) = self.module.define_function(func_id, &mut self.ctx) {
+            eprintln!("=== VERIFIER ERROR in static method '{}::{}' ===", class.name, method.name);
+            eprintln!("Error: {}", e);
+            return Err(anyhow!("Error compiling static method '{}::{}': {}", class.name, method.name, e));
+        }
         self.module.clear_context(&mut self.ctx);
 
         Ok(())
@@ -2090,7 +2182,14 @@ impl Compiler {
             builder.finalize();
         }
 
-        self.module.define_function(func_id, &mut self.ctx)?;
+        if let Err(e) = self.module.define_function(func_id, &mut self.ctx) {
+            eprintln!("=== VERIFIER ERROR in constructor '{}' ===", class.name);
+            eprintln!("Error: {}", e);
+            eprintln!("Debug: {:?}", e);
+            eprintln!("=== CLIF IR ===");
+            eprintln!("{}", self.ctx.func.display());
+            return Err(anyhow!("Error compiling constructor '{}': {}", class.name, e));
+        }
         self.module.clear_context(&mut self.ctx);
 
         Ok(())
@@ -4095,6 +4194,84 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_closure_call4".to_string(), func_id);
+        }
+
+        // js_closure_call5(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // closure
+            sig.params.push(AbiParam::new(types::F64)); // arg0
+            sig.params.push(AbiParam::new(types::F64)); // arg1
+            sig.params.push(AbiParam::new(types::F64)); // arg2
+            sig.params.push(AbiParam::new(types::F64)); // arg3
+            sig.params.push(AbiParam::new(types::F64)); // arg4
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(
+                "js_closure_call5",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_closure_call5".to_string(), func_id);
+        }
+
+        // js_closure_call6(closure: *const ClosureHeader, arg0-5: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // closure
+            sig.params.push(AbiParam::new(types::F64)); // arg0
+            sig.params.push(AbiParam::new(types::F64)); // arg1
+            sig.params.push(AbiParam::new(types::F64)); // arg2
+            sig.params.push(AbiParam::new(types::F64)); // arg3
+            sig.params.push(AbiParam::new(types::F64)); // arg4
+            sig.params.push(AbiParam::new(types::F64)); // arg5
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(
+                "js_closure_call6",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_closure_call6".to_string(), func_id);
+        }
+
+        // js_closure_call7(closure: *const ClosureHeader, arg0-6: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // closure
+            sig.params.push(AbiParam::new(types::F64)); // arg0
+            sig.params.push(AbiParam::new(types::F64)); // arg1
+            sig.params.push(AbiParam::new(types::F64)); // arg2
+            sig.params.push(AbiParam::new(types::F64)); // arg3
+            sig.params.push(AbiParam::new(types::F64)); // arg4
+            sig.params.push(AbiParam::new(types::F64)); // arg5
+            sig.params.push(AbiParam::new(types::F64)); // arg6
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(
+                "js_closure_call7",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_closure_call7".to_string(), func_id);
+        }
+
+        // js_closure_call8(closure: *const ClosureHeader, arg0-7: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // closure
+            sig.params.push(AbiParam::new(types::F64)); // arg0
+            sig.params.push(AbiParam::new(types::F64)); // arg1
+            sig.params.push(AbiParam::new(types::F64)); // arg2
+            sig.params.push(AbiParam::new(types::F64)); // arg3
+            sig.params.push(AbiParam::new(types::F64)); // arg4
+            sig.params.push(AbiParam::new(types::F64)); // arg5
+            sig.params.push(AbiParam::new(types::F64)); // arg6
+            sig.params.push(AbiParam::new(types::F64)); // arg7
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(
+                "js_closure_call8",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_closure_call8".to_string(), func_id);
         }
 
         // Box runtime functions for mutable captured variables
@@ -8953,8 +9130,13 @@ impl Compiler {
         }
 
         // Compile and define the function
-        self.module.define_function(func_id, &mut self.ctx)
-            .map_err(|e| anyhow!("Error compiling function '{}': {:?}", func.name, e))?;
+        if let Err(e) = self.module.define_function(func_id, &mut self.ctx) {
+            // Print detailed error info
+            eprintln!("=== VERIFIER ERROR in function '{}' ===", func.name);
+            eprintln!("Error: {}", e);
+            eprintln!("Debug: {:?}", e);
+            return Err(anyhow!("Error compiling function '{}': {}", func.name, e));
+        }
         self.module.clear_context(&mut self.ctx);
 
         Ok(())
@@ -9334,6 +9516,10 @@ impl Compiler {
             }
             Expr::PropertyUpdate { object, .. } => {
                 self.collect_closures_from_expr(object, closures, enclosing_class);
+            }
+            Expr::IndexUpdate { object, index, .. } => {
+                self.collect_closures_from_expr(object, closures, enclosing_class);
+                self.collect_closures_from_expr(index, closures, enclosing_class);
             }
             // Additional expressions that may contain closures
             Expr::FetchWithOptions { url, method, body, headers } => {
@@ -10334,8 +10520,12 @@ impl Compiler {
             builder.finalize();
         }
 
-        self.module.define_function(clif_func_id, &mut self.ctx)
-            .map_err(|e| anyhow!("Error compiling closure_{} with {} params: {:?}", func_id, params.len(), e))?;
+        if let Err(e) = self.module.define_function(clif_func_id, &mut self.ctx) {
+            eprintln!("=== VERIFIER ERROR in closure_{} ({} params) ===", func_id, params.len());
+            eprintln!("Error: {}", e);
+            eprintln!("Debug: {:?}", e);
+            return Err(anyhow!("Error compiling closure_{}: {}", func_id, e));
+        }
         self.module.clear_context(&mut self.ctx);
 
         Ok(())
@@ -10448,6 +10638,12 @@ impl Compiler {
                             builder.ins().bitcast(types::I64, MemFlags::new(), val)
                         } else if expected_type == types::F64 && actual_type == types::I64 {
                             builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                        } else if expected_type == types::F64 && actual_type == types::I32 {
+                            // i32 (from loop optimization) -> f64
+                            builder.ins().fcvt_from_sint(types::F64, val)
+                        } else if expected_type == types::I64 && actual_type == types::I32 {
+                            // i32 (from loop optimization) -> i64
+                            builder.ins().sextend(types::I64, val)
                         } else {
                             val
                         }
@@ -10488,7 +10684,11 @@ impl Compiler {
             builder.finalize();
         }
 
-        self.module.define_function(wrapper_id, &mut self.ctx)?;
+        if let Err(e) = self.module.define_function(wrapper_id, &mut self.ctx) {
+            eprintln!("=== VERIFIER ERROR in wrapper '{}' ===", func.name);
+            eprintln!("Error: {}", e);
+            return Err(anyhow!("Error compiling wrapper '{}': {}", func.name, e));
+        }
         self.module.clear_context(&mut self.ctx);
 
         self.func_wrapper_ids.insert(func_id, wrapper_id);
@@ -10623,13 +10823,22 @@ impl Compiler {
 
                                 // For pointer types (arrays, objects), NaN-box the pointer before storing
                                 // so that importing modules can load them uniformly as f64
-                                let val_to_store = if local_info.is_pointer && !local_info.is_string {
-                                    // Get the NaN-boxing function
-                                    let nanbox_func_id = self.extern_funcs.get("js_nanbox_pointer")
-                                        .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
-                                    let nanbox_ref = self.module.declare_func_in_func(*nanbox_func_id, builder.func);
-                                    let call = builder.ins().call(nanbox_ref, &[val]);
-                                    builder.inst_results(call)[0]
+                                // Only NaN-box if the value is stored as i64 (raw pointer)
+                                // If already stored as f64 (union or NaN-boxed), it's already in the right format
+                                let val_to_store = if local_info.is_pointer && !local_info.is_string && !local_info.is_union {
+                                    // Check if val is i64 type - only then do we need to NaN-box
+                                    let val_type = builder.func.dfg.value_type(val);
+                                    if val_type == types::I64 {
+                                        // Get the NaN-boxing function
+                                        let nanbox_func_id = self.extern_funcs.get("js_nanbox_pointer")
+                                            .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                                        let nanbox_ref = self.module.declare_func_in_func(*nanbox_func_id, builder.func);
+                                        let call = builder.ins().call(nanbox_ref, &[val]);
+                                        builder.inst_results(call)[0]
+                                    } else {
+                                        // Already f64 (NaN-boxed), use as-is
+                                        val
+                                    }
                                 } else {
                                     val
                                 };
@@ -10693,7 +10902,16 @@ impl Compiler {
             builder.finalize();
         }
 
-        self.module.define_function(func_id, &mut self.ctx)?;
+        let func_name = if self.is_entry_module { "main" } else { module_name };
+        if let Err(e) = self.module.define_function(func_id, &mut self.ctx) {
+            eprintln!("=== VERIFIER ERROR in init/main '{}' ===", func_name);
+            eprintln!("Error: {}", e);
+            eprintln!("Debug: {:?}", e);
+            // Print the CLIF IR for debugging
+            eprintln!("=== CLIF IR ===");
+            eprintln!("{}", self.ctx.func.display());
+            return Err(anyhow!("Error compiling init/main '{}': {}", func_name, e));
+        }
         self.module.clear_context(&mut self.ctx);
 
         Ok(())
@@ -13428,8 +13646,9 @@ fn compile_stmt(
             collect_assigned_in_stmts(body, &mut try_assigned);
 
             // Create stack slots for variables that exist before the try and are assigned in try
-            // Map: LocalId -> (StackSlot, is_i64)
-            let mut try_var_slots: HashMap<LocalId, (StackSlot, bool)> = HashMap::new();
+            // Map: LocalId -> (StackSlot, is_i64, original_var, was_i32)
+            // We need to store the original Variable because loop optimization might change info.var
+            let mut try_var_slots: HashMap<LocalId, (StackSlot, bool, Variable, bool)> = HashMap::new();
             for local_id in &try_assigned {
                 if let Some(info) = locals.get(local_id) {
                     // Variable is stored as i64 only if is_pointer && !is_union
@@ -13443,7 +13662,8 @@ fn compile_stmt(
                     // Store current value to slot before setjmp
                     let val = builder.use_var(info.var);
                     builder.ins().stack_store(val, slot, 0);
-                    try_var_slots.insert(*local_id, (slot, is_i64));
+                    // Store original var and is_i32 state for proper restoration after longjmp
+                    try_var_slots.insert(*local_id, (slot, is_i64, info.var, info.is_i32));
                 }
             }
 
@@ -13489,10 +13709,22 @@ fn compile_stmt(
                 // Only do this if the block isn't already terminated (e.g., by throw)
                 let current_after = builder.current_block().unwrap();
                 if !is_block_filled(builder, current_after) {
-                    for (local_id, (slot, _is_i64)) in &try_var_slots {
+                    for (local_id, (slot, is_i64, _orig_var, _was_i32)) in &try_var_slots {
                         if let Some(info) = locals.get(local_id) {
                             let val = builder.use_var(info.var);
-                            builder.ins().stack_store(val, *slot, 0);
+                            // Convert to the expected slot type if needed
+                            // Loop optimization might have changed the variable to i32
+                            let store_val = if info.is_i32 {
+                                // Variable is now i32, convert to f64 for storage
+                                builder.ins().fcvt_from_sint(types::F64, val)
+                            } else if *is_i64 && builder.func.dfg.value_type(val) == types::F64 {
+                                builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                            } else if !*is_i64 && builder.func.dfg.value_type(val) == types::I64 {
+                                builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                            } else {
+                                val
+                            };
+                            builder.ins().stack_store(store_val, *slot, 0);
                         }
                     }
                 }
@@ -13517,11 +13749,17 @@ fn compile_stmt(
             builder.seal_block(catch_block);
 
             // Restore variables from stack slots (longjmp may have clobbered SSA values)
-            for (local_id, (slot, is_i64)) in &try_var_slots {
-                if let Some(info) = locals.get(local_id) {
-                    let var_type = if *is_i64 { types::I64 } else { types::F64 };
-                    let val = builder.ins().stack_load(var_type, *slot, 0);
-                    builder.def_var(info.var, val);
+            // CRITICAL: We must restore to the ORIGINAL variable, not the current info.var
+            // Loop optimization inside the try block might have changed info.var to an i32 variable
+            for (local_id, (slot, is_i64, orig_var, was_i32)) in &try_var_slots {
+                let var_type = if *is_i64 { types::I64 } else { types::F64 };
+                let val = builder.ins().stack_load(var_type, *slot, 0);
+                // Always restore to the original variable (which has the correct declared type)
+                builder.def_var(*orig_var, val);
+                // Restore the LocalInfo to its original state
+                if let Some(info) = locals.get_mut(local_id) {
+                    info.var = *orig_var;
+                    info.is_i32 = *was_i32;
                 }
             }
 
@@ -14381,30 +14619,39 @@ fn compile_expr(
 
                 // Ensure the value is f64 (js_json_stringify expects f64 JSValue)
                 // For pointer expressions (arrays, objects), we need to NaN-box them properly
-                // Check both Cranelift type (for variables) and expression type (for literals)
+                // BUT: if the value is already NaN-boxed (stored as F64 with is_union), don't double NaN-box!
                 let val_type = builder.func.dfg.value_type(val);
-                let is_pointer_expr = matches!(value_expr.as_ref(),
+
+                // Check if value is a raw I64 pointer that needs NaN-boxing
+                // OR a newly created object/array literal (these return I64 and need boxing)
+                let is_literal_pointer = matches!(value_expr.as_ref(),
                     Expr::Array(_) | Expr::ArraySpread(_) | Expr::Object(_) |
                     Expr::New { .. } | Expr::MapNew | Expr::SetNew
-                ) || match value_expr.as_ref() {
-                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_pointer || i.is_array).unwrap_or(false),
+                );
+
+                // Check if it's a LocalGet to a variable that stores raw I64 pointers
+                // Variables with is_union=true are already NaN-boxed in F64, so DON'T NaN-box again!
+                let is_raw_pointer_var = match value_expr.as_ref() {
+                    Expr::LocalGet(id) => locals.get(id).map(|i| {
+                        // Only raw pointer if is_pointer AND NOT is_union (is_union means already NaN-boxed)
+                        (i.is_pointer || i.is_array) && !i.is_union
+                    }).unwrap_or(false),
                     _ => false,
                 };
 
-                let val_f64 = if val_type == types::I64 || is_pointer_expr {
-                    // NaN-box the pointer so js_json_stringify can recognize it
+                let val_f64 = if val_type == types::I64 && (is_literal_pointer || is_raw_pointer_var) {
+                    // Raw I64 pointer needs NaN-boxing
                     let nanbox_func = extern_funcs.get("js_nanbox_pointer")
                         .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
                     let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
-                    // If val is f64 (already bitcast), convert back to i64 first
-                    let ptr_val = if val_type == types::F64 {
-                        builder.ins().bitcast(types::I64, MemFlags::new(), val)
-                    } else {
-                        val
-                    };
-                    let call = builder.ins().call(nanbox_ref, &[ptr_val]);
+                    let call = builder.ins().call(nanbox_ref, &[val]);
                     builder.inst_results(call)[0]
+                } else if val_type == types::I64 {
+                    // I64 but not a known pointer - bitcast to F64
+                    builder.ins().bitcast(types::F64, MemFlags::new(), val)
                 } else {
+                    // F64 - either a number, or already NaN-boxed pointer (from is_union variable)
+                    // Pass directly to js_json_stringify which will detect the type
                     val
                 };
 
@@ -16811,7 +17058,13 @@ fn compile_expr(
         }
         Expr::LocalGet(id) => {
             let info = locals.get(id)
-                .ok_or_else(|| anyhow!("Undefined local variable: {}. Available locals: {:?}", id, locals.keys().collect::<Vec<_>>()))?;
+                .ok_or_else(|| {
+                    // Collect more diagnostic info
+                    let available: Vec<_> = locals.iter()
+                        .map(|(k, v)| format!("{}:{}", k, v.name.as_deref().unwrap_or("?")))
+                        .collect();
+                    anyhow!("Undefined local variable: {} (LocalGet). Available locals: {:?}", id, available)
+                })?;
 
             if info.is_boxed {
                 // For boxed variables (mutable captures), call js_box_get to read the current value
@@ -16861,7 +17114,12 @@ fn compile_expr(
             // Check for string append pattern: x = x + y where x is a string
             // This allows us to use in-place append for O(1) amortized concatenation
             let info = locals.get(id)
-                .ok_or_else(|| anyhow!("Undefined local variable: {}", id))?;
+                .ok_or_else(|| {
+                    let available: Vec<_> = locals.iter()
+                        .map(|(k, v)| format!("{}:{}", k, v.name.as_deref().unwrap_or("?")))
+                        .collect();
+                    anyhow!("Undefined local variable: {} (LocalSet). Available locals: {:?}", id, available)
+                })?;
 
             // OPTIMIZATION: Native i32 arithmetic for integer accumulators
             // Pattern: x = x + constant where x is i32
@@ -21029,7 +21287,11 @@ fn compile_expr(
                                 2 => "js_closure_call2",
                                 3 => "js_closure_call3",
                                 4 => "js_closure_call4",
-                                n => return Err(anyhow!("Closure calls with {} arguments not supported (max 4)", n)),
+                                5 => "js_closure_call5",
+                                6 => "js_closure_call6",
+                                7 => "js_closure_call7",
+                                8 => "js_closure_call8",
+                                n => return Err(anyhow!("Closure calls with {} arguments not supported (max 8)", n)),
                             };
 
                             let call_func = extern_funcs.get(call_func_name)
@@ -22948,6 +23210,100 @@ fn compile_expr(
 
             // Return old value for postfix (x++), new value for prefix (++x)
             Ok(if *prefix { new_val } else { old_val })
+        }
+        Expr::IndexUpdate { object, index, op, prefix } => {
+            // Handle arr[i]++ / ++arr[i] / arr[i]-- / --arr[i]
+            // Also handles obj[key]++ with string keys
+
+            // Helper to check if an expression produces a string
+            fn is_string_index(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                match expr {
+                    Expr::String(_) => true,
+                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                    Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
+                    Expr::PropertyGet { .. } => true,
+                    _ => false,
+                }
+            }
+
+            // Compile the object expression
+            let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+
+            // Extract the pointer from potentially NaN-boxed value
+            let obj_f64 = ensure_f64(builder, obj_val);
+            let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+            let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+            let call = builder.ins().call(get_ptr_ref, &[obj_f64]);
+            let obj_ptr = builder.inst_results(call)[0];
+
+            if is_string_index(index, locals) {
+                // String key: obj[key]++
+                let key_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
+                let key_f64 = ensure_f64(builder, key_val);
+                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                let str_call = builder.ins().call(get_str_ptr_ref, &[key_f64]);
+                let key_ptr = builder.inst_results(str_call)[0];
+
+                // Get current value using js_object_get_field_by_name_f64
+                let get_func = extern_funcs.get("js_object_get_field_by_name_f64")
+                    .ok_or_else(|| anyhow!("js_object_get_field_by_name_f64 not declared"))?;
+                let get_ref = module.declare_func_in_func(*get_func, builder.func);
+                let get_call = builder.ins().call(get_ref, &[obj_ptr, key_ptr]);
+                let old_val = builder.inst_results(get_call)[0];
+
+                // Compute new value: old +/- 1
+                let one = builder.ins().f64const(1.0);
+                let new_val = match op {
+                    BinaryOp::Add => builder.ins().fadd(old_val, one),
+                    BinaryOp::Sub => builder.ins().fsub(old_val, one),
+                    _ => return Err(anyhow!("Unexpected op in IndexUpdate: {:?}", op)),
+                };
+
+                // Set new value using js_object_set_field_by_name
+                let set_func = extern_funcs.get("js_object_set_field_by_name")
+                    .ok_or_else(|| anyhow!("js_object_set_field_by_name not declared"))?;
+                let set_ref = module.declare_func_in_func(*set_func, builder.func);
+                builder.ins().call(set_ref, &[obj_ptr, key_ptr, new_val]);
+
+                // Return old value for postfix (x++), new value for prefix (++x)
+                Ok(if *prefix { new_val } else { old_val })
+            } else {
+                // Integer index: arr[i]++
+                let idx_i32 = if let Expr::Integer(n) = index.as_ref() {
+                    builder.ins().iconst(types::I32, *n)
+                } else {
+                    let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
+                    let idx_f64 = ensure_f64(builder, idx_val);
+                    builder.ins().fcvt_to_sint(types::I32, idx_f64)
+                };
+
+                // Get current value using js_array_get_f64
+                let get_func = extern_funcs.get("js_array_get_f64")
+                    .ok_or_else(|| anyhow!("js_array_get_f64 not declared"))?;
+                let get_ref = module.declare_func_in_func(*get_func, builder.func);
+                let get_call = builder.ins().call(get_ref, &[obj_ptr, idx_i32]);
+                let old_val = builder.inst_results(get_call)[0];
+
+                // Compute new value: old +/- 1
+                let one = builder.ins().f64const(1.0);
+                let new_val = match op {
+                    BinaryOp::Add => builder.ins().fadd(old_val, one),
+                    BinaryOp::Sub => builder.ins().fsub(old_val, one),
+                    _ => return Err(anyhow!("Unexpected op in IndexUpdate: {:?}", op)),
+                };
+
+                // Set new value using js_array_set_f64
+                let set_func = extern_funcs.get("js_array_set_f64")
+                    .ok_or_else(|| anyhow!("js_array_set_f64 not declared"))?;
+                let set_ref = module.declare_func_in_func(*set_func, builder.func);
+                builder.ins().call(set_ref, &[obj_ptr, idx_i32, new_val]);
+
+                // Return old value for postfix (x++), new value for prefix (++x)
+                Ok(if *prefix { new_val } else { old_val })
+            }
         }
         Expr::PropertyGet { object, property } => {
             // Handle process.argv.length specially (ProcessArgv returns an array, not object)

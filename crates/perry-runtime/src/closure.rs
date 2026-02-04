@@ -136,6 +136,33 @@ pub extern "C" fn js_closure_call5(closure: *const ClosureHeader, arg0: f64, arg
     }
 }
 
+/// Call a closure with 6 arguments, returning f64
+#[no_mangle]
+pub extern "C" fn js_closure_call6(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64) -> f64 {
+    unsafe {
+        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
+        func(closure, arg0, arg1, arg2, arg3, arg4, arg5)
+    }
+}
+
+/// Call a closure with 7 arguments, returning f64
+#[no_mangle]
+pub extern "C" fn js_closure_call7(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64) -> f64 {
+    unsafe {
+        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
+        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6)
+    }
+}
+
+/// Call a closure with 8 arguments, returning f64
+#[no_mangle]
+pub extern "C" fn js_closure_call8(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64) -> f64 {
+    unsafe {
+        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
+        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+    }
+}
+
 /// Call a JavaScript function value with variable arguments
 /// This is the native implementation for dynamic function dispatch.
 /// func_value: NaN-boxed f64 containing a closure pointer
@@ -202,16 +229,49 @@ pub unsafe extern "C" fn js_native_call_value(
             let arg4 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(4) };
             js_closure_call5(closure, arg0, arg1, arg2, arg3, arg4)
         }
-        _ => {
-            // For more than 5 arguments, we'd need a more generic approach
-            // For now, just call with as many as we can handle
-            eprintln!("Warning: js_native_call_value called with {} args, only supporting up to 5", args_len);
+        6 => {
             let arg0 = if args_ptr.is_null() { 0.0 } else { *args_ptr };
             let arg1 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(1) };
             let arg2 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(2) };
             let arg3 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(3) };
             let arg4 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(4) };
-            js_closure_call5(closure, arg0, arg1, arg2, arg3, arg4)
+            let arg5 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(5) };
+            js_closure_call6(closure, arg0, arg1, arg2, arg3, arg4, arg5)
+        }
+        7 => {
+            let arg0 = if args_ptr.is_null() { 0.0 } else { *args_ptr };
+            let arg1 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(1) };
+            let arg2 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(2) };
+            let arg3 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(3) };
+            let arg4 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(4) };
+            let arg5 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(5) };
+            let arg6 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(6) };
+            js_closure_call7(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6)
+        }
+        8 => {
+            let arg0 = if args_ptr.is_null() { 0.0 } else { *args_ptr };
+            let arg1 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(1) };
+            let arg2 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(2) };
+            let arg3 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(3) };
+            let arg4 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(4) };
+            let arg5 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(5) };
+            let arg6 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(6) };
+            let arg7 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(7) };
+            js_closure_call8(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+        }
+        _ => {
+            // For more than 8 arguments, we'd need a more generic approach
+            // For now, just call with as many as we can handle
+            eprintln!("Warning: js_native_call_value called with {} args, only supporting up to 8", args_len);
+            let arg0 = if args_ptr.is_null() { 0.0 } else { *args_ptr };
+            let arg1 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(1) };
+            let arg2 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(2) };
+            let arg3 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(3) };
+            let arg4 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(4) };
+            let arg5 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(5) };
+            let arg6 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(6) };
+            let arg7 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(7) };
+            js_closure_call8(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
         }
     }
 }

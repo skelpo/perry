@@ -886,7 +886,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
         }
 
-        let object_code = compiler.compile_module(hir_module)?;
+        let object_code = compiler.compile_module(hir_module)
+            .map_err(|e| anyhow::anyhow!("Error compiling module '{}' ({}): {}", hir_module.name, path.display(), e))?;
 
         // Generate a unique object file name to handle files with same basename in different directories
         // e.g., routes/auth.ts -> routes_auth.o, middleware/auth.ts -> middleware_auth.o

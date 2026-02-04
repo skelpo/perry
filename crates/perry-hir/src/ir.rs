@@ -545,6 +545,13 @@ pub enum Expr {
         index: Box<Expr>,
         value: Box<Expr>,
     },
+    // Index update (arr[i]++ or obj[key]++)
+    IndexUpdate {
+        object: Box<Expr>,
+        index: Box<Expr>,
+        op: BinaryOp,      // Add for ++, Sub for --
+        prefix: bool,      // true for ++x, false for x++
+    },
 
     // Object literal
     Object(Vec<(String, Expr)>),

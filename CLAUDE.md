@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.87
+**Current Version:** 0.2.93
 
 ## Workflow Requirements
 
@@ -235,9 +235,54 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.87)
+## Recent Fixes (v0.2.37-0.2.93)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.93
+- Fix JSON.stringify() returning garbage numbers for objects stored in union-typed variables
+  - Root cause: Double NaN-boxing - objects in is_union=true variables are already NaN-boxed
+  - Codegen was NaN-boxing them again, corrupting the pointer to look like a large number
+  - Fix: Only NaN-box raw I64 pointers, pass F64 values (already NaN-boxed) directly
+
+### v0.2.92
+- Improved error diagnostics for undefined local variable errors
+  - Now shows variable names alongside LocalIds for easier debugging
+  - Helps identify which variable failed to be captured or loaded
+
+### v0.2.91
+- Fix Cranelift panic "declared type of variable var0 doesn't match type of value" in try/catch blocks
+  - Root cause: Loop optimization inside try blocks could change a variable from f64 to i32
+  - After longjmp to catch block, restoration code tried to assign f64/i64 value to the modified i32 variable
+  - Fix: Store original variable and is_i32 state before try block, restore to original variable after longjmp
+
+### v0.2.90
+- Fix i32/f64 type mismatch in wrapper function argument conversion
+  - Root cause: Wrapper functions only handled i64<->f64 conversions, not i32->f64 or i32->i64
+  - i32 values can appear when loop counter variables are passed through wrapper functions
+  - Fix: Added i32->f64 (fcvt_from_sint) and i32->i64 (sextend) conversion branches in wrapper arg conversion
+
+### v0.2.89
+- Add support for computed property update expressions (`obj[key]++`, `arr[i]--`)
+  - Added new `IndexUpdate` HIR variant in `ir.rs`
+  - Updated `lower.rs` to emit `IndexUpdate` for computed property updates
+  - Added codegen support in `codegen.rs` for both string keys and integer indices
+- Fix Cranelift verifier error when exporting NaN-boxed module variables
+  - Root cause: Variables stored as f64 (already NaN-boxed) were being passed to `js_nanbox_pointer` which expects i64
+  - Fix: Check `builder.func.dfg.value_type(val)` before NaN-boxing - only box if value is i64
+- Fix "Undefined local variable" errors for variables inside nested blocks
+  - Root cause: `create_module_var_globals` and `analyze_module_var_types` only scanned top-level statements
+  - Variables declared inside for loops, if blocks, try/catch, switch cases were not getting global data slots
+  - Fix: Made both functions recursive to walk into nested statement bodies
+  - Now properly handles: For loop bodies/inits, While bodies, If branches, Try/catch/finally, Switch cases
+- Improved verifier error diagnostics with CLIF IR output for constructors and init functions
+
+### v0.2.88
+- Extend closure call support from 4 to 8 arguments
+  - Added `js_closure_call5`, `js_closure_call6`, `js_closure_call7`, `js_closure_call8` to runtime
+  - Declared all new closure call functions in codegen
+  - Updated `js_native_call_value` to handle up to 8 arguments
+  - Fixes "Closure calls with N arguments not supported (max 4)" errors in large codebases
 
 ### v0.2.87
 - Add missing `js_string_char_code_at` extern function declaration in codegen

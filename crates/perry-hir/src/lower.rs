@@ -5229,27 +5229,43 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                         prefix: update.prefix,
                     })
                 }
-                // Member expression: this.count++ or obj.prop++
+                // Member expression: this.count++ or obj.prop++ or obj[key]++
                 ast::Expr::Member(member) => {
                     let object = lower_expr(ctx, &member.obj)?;
-                    let property = match &member.prop {
-                        ast::MemberProp::Ident(ident) => ident.sym.to_string(),
-                        ast::MemberProp::PrivateName(priv_name) => format!("#{}", priv_name.name),
-                        ast::MemberProp::Computed(_) => {
-                            return Err(anyhow!("Computed property not supported in update expression"));
+                    match &member.prop {
+                        ast::MemberProp::Ident(ident) => {
+                            let property = ident.sym.to_string();
+                            // Desugar: this.count++ becomes (tmp = this.count, this.count = tmp + 1, tmp)
+                            // For prefix ++this.count becomes (this.count = this.count + 1, this.count)
+                            // We simplify to just: this.count = this.count + 1
+                            // The return value semantics are handled at codegen
+                            Ok(Expr::PropertyUpdate {
+                                object: Box::new(object),
+                                property,
+                                op: binary_op,
+                                prefix: update.prefix,
+                            })
                         }
-                    };
-
-                    // Desugar: this.count++ becomes (tmp = this.count, this.count = tmp + 1, tmp)
-                    // For prefix ++this.count becomes (this.count = this.count + 1, this.count)
-                    // We simplify to just: this.count = this.count + 1
-                    // The return value semantics are handled at codegen
-                    Ok(Expr::PropertyUpdate {
-                        object: Box::new(object),
-                        property,
-                        op: binary_op,
-                        prefix: update.prefix,
-                    })
+                        ast::MemberProp::PrivateName(priv_name) => {
+                            let property = format!("#{}", priv_name.name);
+                            Ok(Expr::PropertyUpdate {
+                                object: Box::new(object),
+                                property,
+                                op: binary_op,
+                                prefix: update.prefix,
+                            })
+                        }
+                        ast::MemberProp::Computed(comp) => {
+                            // Computed property: obj[key]++
+                            let index = lower_expr(ctx, &comp.expr)?;
+                            Ok(Expr::IndexUpdate {
+                                object: Box::new(object),
+                                index: Box::new(index),
+                                op: binary_op,
+                                prefix: update.prefix,
+                            })
+                        }
+                    }
                 }
                 _ => Err(anyhow!("Update expression only supports identifiers and member expressions")),
             }
@@ -6974,6 +6990,10 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
         Expr::PropertyUpdate { object, .. } => {
             collect_local_refs_expr(object, refs);
         }
+        Expr::IndexUpdate { object, index, .. } => {
+            collect_local_refs_expr(object, refs);
+            collect_local_refs_expr(index, refs);
+        }
         Expr::New { args, .. } => {
             for arg in args {
                 collect_local_refs_expr(arg, refs);
@@ -7636,6 +7656,10 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
             collect_assigned_locals_expr(object, assigned);
             collect_assigned_locals_expr(index, assigned);
             collect_assigned_locals_expr(value, assigned);
+        }
+        Expr::IndexUpdate { object, index, .. } => {
+            collect_assigned_locals_expr(object, assigned);
+            collect_assigned_locals_expr(index, assigned);
         }
         Expr::Array(elements) => {
             for elem in elements {
