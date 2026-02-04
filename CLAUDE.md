@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.93
+**Current Version:** 0.2.94
 
 ## Workflow Requirements
 
@@ -235,9 +235,16 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.93)
+## Recent Fixes (v0.2.37-0.2.94)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.94
+- Fix function inlining breaking Set.has(), Map.has(), and other Set/Map/Array operations
+  - Root cause: `substitute_locals()` in `inline.rs` didn't handle Set/Map/Array expression types
+  - When inlining functions containing these operations, LocalGet references weren't substituted
+  - Caused "Undefined local variable" errors when inlined functions used Set/Map/Array methods
+  - Fix: Added handling for SetHas, SetAdd, SetDelete, SetSize, SetClear, MapHas, MapGet, MapSet, MapDelete, ArrayIndexOf, ArrayIncludes, ArraySlice, ArraySplice, ArrayForEach, ArrayMap, ArrayFilter, ArrayFind, ArrayFindIndex, ArrayReduce, ArrayJoin, and Await expressions
 
 ### v0.2.93
 - Fix JSON.stringify() returning garbage numbers for objects stored in union-typed variables

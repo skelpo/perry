@@ -9090,7 +9090,8 @@ impl Compiler {
             // For async functions, we need to handle returns specially
             if func.is_async {
                 for stmt in &func.body {
-                    compile_async_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, promise_var.unwrap(), &boxed_vars)?;
+                    compile_async_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, promise_var.unwrap(), &boxed_vars)
+                        .map_err(|e| anyhow!("In async function '{}': {}", func.name, e))?;
                 }
 
                 // If no explicit return, resolve with undefined and return the promise
@@ -9110,7 +9111,8 @@ impl Compiler {
                 }
             } else {
                 for stmt in &func.body {
-                    compile_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, None, None, &boxed_vars)?;
+                    compile_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, None, None, &boxed_vars)
+                        .map_err(|e| anyhow!("In function '{}': {}", func.name, e))?;
                 }
 
                 // If no explicit return, return 0 with the correct type
@@ -10502,7 +10504,7 @@ impl Compiler {
                     this_ctx.as_ref(),
                     None,
                     &boxed_vars,
-                )?;
+                ).map_err(|e| anyhow!("In closure (func_id={}, captures={:?}): {}", func_id, captures, e))?;
             }
 
             // If no explicit return, return 0 with correct type
@@ -17063,7 +17065,8 @@ fn compile_expr(
                     let available: Vec<_> = locals.iter()
                         .map(|(k, v)| format!("{}:{}", k, v.name.as_deref().unwrap_or("?")))
                         .collect();
-                    anyhow!("Undefined local variable: {} (LocalGet). Available locals: {:?}", id, available)
+                    // Print the module variable data IDs for debugging
+                    anyhow!("Undefined local variable: {} (LocalGet). Available locals: {:?}. This LocalId may be from a different function's scope - likely a closure capture bug or wrong identifier resolution in HIR lowering.", id, available)
                 })?;
 
             if info.is_boxed {

@@ -766,6 +766,78 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         Expr::TypeOf(inner) => {
             substitute_locals(inner, param_map, next_local_id);
         }
+        // Set operations
+        Expr::SetHas { set, value } | Expr::SetDelete { set, value } => {
+            substitute_locals(set, param_map, next_local_id);
+            substitute_locals(value, param_map, next_local_id);
+        }
+        Expr::SetAdd { value, .. } => {
+            substitute_locals(value, param_map, next_local_id);
+        }
+        Expr::SetSize(set) | Expr::SetClear(set) => {
+            substitute_locals(set, param_map, next_local_id);
+        }
+        // Map operations
+        Expr::MapHas { map, key } | Expr::MapGet { map, key } | Expr::MapDelete { map, key } => {
+            substitute_locals(map, param_map, next_local_id);
+            substitute_locals(key, param_map, next_local_id);
+        }
+        Expr::MapSet { map, key, value } => {
+            substitute_locals(map, param_map, next_local_id);
+            substitute_locals(key, param_map, next_local_id);
+            substitute_locals(value, param_map, next_local_id);
+        }
+        Expr::MapSize(map) | Expr::MapClear(map) => {
+            substitute_locals(map, param_map, next_local_id);
+        }
+        // Array operations
+        Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } => {
+            substitute_locals(value, param_map, next_local_id);
+        }
+        Expr::ArrayIndexOf { array, value } | Expr::ArrayIncludes { array, value } => {
+            substitute_locals(array, param_map, next_local_id);
+            substitute_locals(value, param_map, next_local_id);
+        }
+        Expr::ArraySlice { array, start, end } => {
+            substitute_locals(array, param_map, next_local_id);
+            substitute_locals(start, param_map, next_local_id);
+            if let Some(e) = end {
+                substitute_locals(e, param_map, next_local_id);
+            }
+        }
+        Expr::ArraySplice { start, delete_count, items, .. } => {
+            substitute_locals(start, param_map, next_local_id);
+            if let Some(dc) = delete_count {
+                substitute_locals(dc, param_map, next_local_id);
+            }
+            for item in items {
+                substitute_locals(item, param_map, next_local_id);
+            }
+        }
+        Expr::ArrayForEach { array, callback } |
+        Expr::ArrayMap { array, callback } |
+        Expr::ArrayFilter { array, callback } |
+        Expr::ArrayFind { array, callback } |
+        Expr::ArrayFindIndex { array, callback } => {
+            substitute_locals(array, param_map, next_local_id);
+            substitute_locals(callback, param_map, next_local_id);
+        }
+        Expr::ArrayReduce { array, callback, initial } => {
+            substitute_locals(array, param_map, next_local_id);
+            substitute_locals(callback, param_map, next_local_id);
+            if let Some(init) = initial {
+                substitute_locals(init, param_map, next_local_id);
+            }
+        }
+        Expr::ArrayJoin { array, separator } => {
+            substitute_locals(array, param_map, next_local_id);
+            if let Some(sep) = separator {
+                substitute_locals(sep, param_map, next_local_id);
+            }
+        }
+        Expr::Await(inner) => {
+            substitute_locals(inner, param_map, next_local_id);
+        }
         _ => {}
     }
 }
