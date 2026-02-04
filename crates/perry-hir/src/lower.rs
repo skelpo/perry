@@ -7454,6 +7454,64 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
         // OS module expressions (no local refs)
         Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsType | Expr::OsRelease |
         Expr::OsHomedir | Expr::OsTmpdir | Expr::OsTotalmem | Expr::OsFreemem | Expr::OsCpus => {}
+        // Delete operator
+        Expr::Delete(inner) => {
+            collect_local_refs_expr(inner, refs);
+        }
+        // Error operations
+        Expr::ErrorNew(msg) => {
+            if let Some(m) = msg {
+                collect_local_refs_expr(m, refs);
+            }
+        }
+        Expr::ErrorMessage(err) => {
+            collect_local_refs_expr(err, refs);
+        }
+        // Uint8Array operations
+        Expr::Uint8ArrayNew(size) => {
+            if let Some(s) = size {
+                collect_local_refs_expr(s, refs);
+            }
+        }
+        Expr::Uint8ArrayFrom(data) | Expr::Uint8ArrayLength(data) => {
+            collect_local_refs_expr(data, refs);
+        }
+        Expr::Uint8ArrayGet { array, index } => {
+            collect_local_refs_expr(array, refs);
+            collect_local_refs_expr(index, refs);
+        }
+        Expr::Uint8ArraySet { array, index, value } => {
+            collect_local_refs_expr(array, refs);
+            collect_local_refs_expr(index, refs);
+            collect_local_refs_expr(value, refs);
+        }
+        // Dynamic env access
+        Expr::EnvGetDynamic(key) => {
+            collect_local_refs_expr(key, refs);
+        }
+        // JS runtime expressions with sub-expressions
+        Expr::JsGetProperty { object, .. } => {
+            collect_local_refs_expr(object, refs);
+        }
+        Expr::JsSetProperty { object, value, .. } => {
+            collect_local_refs_expr(object, refs);
+            collect_local_refs_expr(value, refs);
+        }
+        Expr::JsNew { module_handle, args, .. } => {
+            collect_local_refs_expr(module_handle, refs);
+            for arg in args {
+                collect_local_refs_expr(arg, refs);
+            }
+        }
+        Expr::JsNewFromHandle { constructor, args } => {
+            collect_local_refs_expr(constructor, refs);
+            for arg in args {
+                collect_local_refs_expr(arg, refs);
+            }
+        }
+        Expr::JsCreateCallback { closure, .. } => {
+            collect_local_refs_expr(closure, refs);
+        }
         // Catch-all for any other terminal expressions
         _ => {}
     }
@@ -8088,6 +8146,64 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
         // OS module expressions (no local refs or assignments)
         Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsType | Expr::OsRelease |
         Expr::OsHomedir | Expr::OsTmpdir | Expr::OsTotalmem | Expr::OsFreemem | Expr::OsCpus => {}
+        // Delete operator
+        Expr::Delete(inner) => {
+            collect_assigned_locals_expr(inner, assigned);
+        }
+        // Error operations
+        Expr::ErrorNew(msg) => {
+            if let Some(m) = msg {
+                collect_assigned_locals_expr(m, assigned);
+            }
+        }
+        Expr::ErrorMessage(err) => {
+            collect_assigned_locals_expr(err, assigned);
+        }
+        // Uint8Array operations
+        Expr::Uint8ArrayNew(size) => {
+            if let Some(s) = size {
+                collect_assigned_locals_expr(s, assigned);
+            }
+        }
+        Expr::Uint8ArrayFrom(data) | Expr::Uint8ArrayLength(data) => {
+            collect_assigned_locals_expr(data, assigned);
+        }
+        Expr::Uint8ArrayGet { array, index } => {
+            collect_assigned_locals_expr(array, assigned);
+            collect_assigned_locals_expr(index, assigned);
+        }
+        Expr::Uint8ArraySet { array, index, value } => {
+            collect_assigned_locals_expr(array, assigned);
+            collect_assigned_locals_expr(index, assigned);
+            collect_assigned_locals_expr(value, assigned);
+        }
+        // Dynamic env access
+        Expr::EnvGetDynamic(key) => {
+            collect_assigned_locals_expr(key, assigned);
+        }
+        // JS runtime expressions with sub-expressions
+        Expr::JsGetProperty { object, .. } => {
+            collect_assigned_locals_expr(object, assigned);
+        }
+        Expr::JsSetProperty { object, value, .. } => {
+            collect_assigned_locals_expr(object, assigned);
+            collect_assigned_locals_expr(value, assigned);
+        }
+        Expr::JsNew { module_handle, args, .. } => {
+            collect_assigned_locals_expr(module_handle, assigned);
+            for arg in args {
+                collect_assigned_locals_expr(arg, assigned);
+            }
+        }
+        Expr::JsNewFromHandle { constructor, args } => {
+            collect_assigned_locals_expr(constructor, assigned);
+            for arg in args {
+                collect_assigned_locals_expr(arg, assigned);
+            }
+        }
+        Expr::JsCreateCallback { closure, .. } => {
+            collect_assigned_locals_expr(closure, assigned);
+        }
         // Catch-all for any other terminal expressions
         _ => {}
     }
