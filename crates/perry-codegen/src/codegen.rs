@@ -3393,6 +3393,20 @@ impl Compiler {
             self.extern_funcs.insert("js_string_char_at".to_string(), func_id);
         }
 
+        // js_string_char_code_at(s: *const StringHeader, index: i32) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // string pointer
+            sig.params.push(AbiParam::new(types::I32)); // index
+            sig.returns.push(AbiParam::new(types::F64)); // UTF-16 code unit or NaN
+            let func_id = self.module.declare_function(
+                "js_string_char_code_at",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_string_char_code_at".to_string(), func_id);
+        }
+
         // js_string_pad_start(s: *const StringHeader, target_length: u32, pad_string: *const StringHeader) -> *mut StringHeader
         {
             let mut sig = self.module.make_signature();
@@ -20728,8 +20742,7 @@ fn compile_expr(
                                             builder.ins().fcvt_to_sint(types::I32, arg_f64)
                                         };
                                         let call = builder.ins().call(func_ref, &[str_ptr, index]);
-                                        let result_i32 = builder.inst_results(call)[0];
-                                        let result_f64 = builder.ins().fcvt_from_sint(types::F64, result_i32);
+                                        let result_f64 = builder.inst_results(call)[0];
                                         return Ok(result_f64);
                                     }
                                 }

@@ -416,21 +416,21 @@ pub extern "C" fn js_string_ends_with(s: *const StringHeader, suffix: *const Str
     1
 }
 
-/// Get character at index (returns char code, -1 if out of bounds)
+/// Get character code at index (returns UTF-16 code unit, or NaN if out of bounds)
 #[no_mangle]
-pub extern "C" fn js_string_char_code_at(s: *const StringHeader, index: u32) -> i32 {
-    if s.is_null() {
-        return -1;
+pub extern "C" fn js_string_char_code_at(s: *const StringHeader, index: i32) -> f64 {
+    if s.is_null() || index < 0 {
+        return f64::NAN;
     }
 
     let len = unsafe { (*s).length };
-    if index >= len {
-        return -1;
+    if index as u32 >= len {
+        return f64::NAN;
     }
 
     unsafe {
         let data = string_data(s);
-        *data.add(index as usize) as i32
+        *data.add(index as usize) as f64
     }
 }
 

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.86
+**Current Version:** 0.2.87
 
 ## Workflow Requirements
 
@@ -235,9 +235,14 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.86)
+## Recent Fixes (v0.2.37-0.2.87)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.87
+- Add missing `js_string_char_code_at` extern function declaration in codegen
+- Update runtime function to return f64 (NaN for out-of-bounds) instead of i32 (-1)
+- Properly follows JavaScript spec: `charCodeAt` returns NaN for invalid indices
 
 ### v0.2.86
 - Fix "mismatched argument count" Cranelift verifier error for cross-module function calls
