@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.79
+**Current Version:** 0.2.80
 
 ## Workflow Requirements
 
@@ -235,12 +235,35 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.78)
+## Recent Fixes (v0.2.37-0.2.80)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
 
+### v0.2.80
+- Add codegen integration for Fastify HTTP framework
+  - Added "fastify" to NATIVE_MODULES list in ir.rs
+  - Added 30+ extern function declarations in codegen.rs for all Fastify FFI functions
+  - Added NativeMethodCall mappings for all Fastify app methods:
+    - Constructor: `Fastify()` / `Fastify({ options })` via default export pattern
+    - Route methods: `app.get()`, `app.post()`, `app.put()`, `app.delete()`, etc.
+    - Lifecycle: `app.addHook()`, `app.setErrorHandler()`, `app.register()`
+    - Server: `app.listen()`
+  - Added context/request/reply method mappings for handlers
+  - Added fastify to modules using `js_nanbox_get_pointer` for handle extraction
+  - Added HIR lowering for default import function calls (e.g., `import F from 'fastify'; F()`)
+    - Uses method name "default" for default export calls
+  - Full TypeScript API now supported:
+    ```typescript
+    import Fastify from 'fastify';
+    const app = Fastify();
+    app.get('/users/:id', async (req, reply) => {
+      return { id: req.params.id };
+    });
+    app.listen({ port: 3000 });
+    ```
+
 ### v0.2.79
-- Add Fastify-compatible native HTTP framework
+- Add Fastify-compatible native HTTP framework runtime
   - New module: `crates/perry-stdlib/src/fastify/` with Fastify-like API
   - `mod.rs` - Core data structures (FastifyApp, Route, Hooks, RoutePattern)
   - `router.rs` - Route pattern parsing and matching (supports `:param` and `*` wildcard)
@@ -253,7 +276,6 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
   - Supports: Plugins with URL prefix
   - Supports: Hono-style context methods (c.json(), c.text(), c.req.param())
   - Re-exported promise functions (js_promise_run_microtasks, js_promise_state, js_is_promise) for stdlib
-  - **Note**: Full codegen integration pending - runtime is complete
 
 ### v0.2.78
 - Fix cross-module function calls with optional parameters causing signature mismatch errors
