@@ -163,6 +163,15 @@ pub extern "C" fn js_stdlib_process_pending() -> i32 {
         }
     }
 
+    // Process pending WebSocket events (server/client listener callbacks)
+    #[cfg(feature = "websocket")]
+    {
+        extern "C" {
+            fn js_ws_process_pending() -> i32;
+        }
+        count += unsafe { js_ws_process_pending() };
+    }
+
     count
 }
 

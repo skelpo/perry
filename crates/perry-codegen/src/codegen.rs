@@ -10,8 +10,14 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, Init, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Thread-local tracking of the current function being compiled (for self-recursive call optimization)
+thread_local! {
+    static CURRENT_FUNC_HIR_ID: Cell<Option<u32>> = Cell::new(None);
+}
 
 /// Global counter for generating unique temporary variable IDs
 static TEMP_VAR_COUNTER: AtomicUsize = AtomicUsize::new(10000);
@@ -5794,6 +5800,34 @@ impl Compiler {
             self.extern_funcs.insert("js_ws_wait_for_message".to_string(), func_id);
         }
 
+        // js_ws_server_new(opts_f64: f64) -> i64 (handle)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // opts (NaN-boxed object or number)
+            sig.returns.push(AbiParam::new(types::I64)); // handle
+            let func_id = self.module.declare_function("js_ws_server_new", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_ws_server_new".to_string(), func_id);
+        }
+
+        // js_ws_on(handle: i64, event_name: i64, callback: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::I64)); // event name string ptr
+            sig.params.push(AbiParam::new(types::I64)); // callback closure ptr
+            sig.returns.push(AbiParam::new(types::I64)); // returns handle for chaining
+            let func_id = self.module.declare_function("js_ws_on", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_ws_on".to_string(), func_id);
+        }
+
+        // js_ws_server_close(handle: i64) -> void
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            let func_id = self.module.declare_function("js_ws_server_close", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_ws_server_close".to_string(), func_id);
+        }
+
         // ========================================================================
         // EventEmitter Functions (events)
         // ========================================================================
@@ -7783,10 +7817,11 @@ impl Compiler {
             self.extern_funcs.insert("js_json_parse".to_string(), func_id);
         }
 
-        // js_json_stringify(value: f64) -> i64 (generic stringify for any JSValue)
+        // js_json_stringify(value: f64, type_hint: u32) -> i64 (generic stringify for any JSValue)
         {
             let mut sig = self.module.make_signature();
             sig.params.push(AbiParam::new(types::F64)); // value (JSValue)
+            sig.params.push(AbiParam::new(types::I32)); // type_hint (0=unknown, 1=object, 2=array)
             sig.returns.push(AbiParam::new(types::I64)); // json string
             let func_id = self.module.declare_function("js_json_stringify", Linkage::Import, &sig)?;
             self.extern_funcs.insert("js_json_stringify".to_string(), func_id);
@@ -8984,6 +9019,16 @@ impl Compiler {
     }
 
     fn compile_function(&mut self, func: &Function) -> Result<()> {
+        // Track current function for self-recursive call optimization
+        CURRENT_FUNC_HIR_ID.with(|c| c.set(Some(func.id)));
+
+        let result = self.compile_function_inner(func);
+
+        CURRENT_FUNC_HIR_ID.with(|c| c.set(None));
+        result
+    }
+
+    fn compile_function_inner(&mut self, func: &Function) -> Result<()> {
         let func_id = *self.func_ids.get(&func.id)
             .ok_or_else(|| anyhow!("Function not declared: {}", func.name))?;
 
@@ -14728,7 +14773,27 @@ fn compile_expr(
                     val
                 };
 
-                let call = builder.ins().call(func_ref, &[val_f64]);
+                // Compute type_hint from expression type
+                let type_hint_val = match value_expr.as_ref() {
+                    Expr::Object(_) => builder.ins().iconst(types::I32, 1), // TYPE_OBJECT
+                    Expr::Array(_) | Expr::ArraySpread(_) => builder.ins().iconst(types::I32, 2), // TYPE_ARRAY
+                    Expr::LocalGet(id) => {
+                        if let Some(info) = locals.get(id) {
+                            if info.is_array {
+                                builder.ins().iconst(types::I32, 2) // TYPE_ARRAY
+                            } else if info.is_pointer && !info.is_string && !info.is_union {
+                                builder.ins().iconst(types::I32, 1) // TYPE_OBJECT
+                            } else {
+                                builder.ins().iconst(types::I32, 0) // TYPE_UNKNOWN
+                            }
+                        } else {
+                            builder.ins().iconst(types::I32, 0)
+                        }
+                    }
+                    _ => builder.ins().iconst(types::I32, 0), // TYPE_UNKNOWN
+                };
+
+                let call = builder.ins().call(func_ref, &[val_f64, type_hint_val]);
                 let result_ptr = builder.inst_results(call)[0];
 
                 // Convert i64 pointer to f64 (NaN-boxed)
@@ -18466,6 +18531,28 @@ fn compile_expr(
                     } else {
                         arg_vals.clone()
                     };
+
+                    // Self-recursive call fast path: skip conversion when types already match
+                    let is_self_call = CURRENT_FUNC_HIR_ID.with(|c| c.get()) == Some(*func_id);
+                    if is_self_call {
+                        let actual_sig = module.declarations().get_function_decl(*clif_func_id);
+                        let expected_param_count = actual_sig.signature.params.len();
+
+                        let all_match = final_args.len() == expected_param_count
+                            && final_args.iter().enumerate().all(|(i, &val)| {
+                                builder.func.dfg.value_type(val) == actual_sig.signature.params[i].value_type
+                            });
+
+                        if all_match {
+                            let call = builder.ins().call(func_ref, &final_args);
+                            let result = builder.inst_results(call)[0];
+                            return if async_func_ids.contains(func_id) {
+                                Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
+                            } else {
+                                Ok(result)
+                            };
+                        }
+                    }
 
                     // Helper to check if argument expression is a string
                     fn is_string_arg_expr(arg: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
@@ -22740,6 +22827,29 @@ fn compile_expr(
                 return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), handle));
             }
 
+            // new WebSocketServer({ port }) - WebSocket server
+            if class_name == "WebSocketServer" {
+                // Compile options argument (or pass undefined if none)
+                let opts_val = if !args.is_empty() {
+                    compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?
+                } else {
+                    builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001u64)) // TAG_UNDEFINED
+                };
+                let opts_f64 = ensure_f64(builder, opts_val);
+
+                let new_func = extern_funcs.get("js_ws_server_new")
+                    .ok_or_else(|| anyhow!("js_ws_server_new not declared"))?;
+                let func_ref = module.declare_func_in_func(*new_func, builder.func);
+                let call = builder.ins().call(func_ref, &[opts_f64]);
+                let handle = builder.inst_results(call)[0];
+                // NaN-box the handle with POINTER_TAG
+                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[handle]);
+                return Ok(builder.inst_results(nanbox_call)[0]);
+            }
+
             // new URLSearchParams(init?) - URL query string params
             if class_name == "URLSearchParams" {
                 if args.is_empty() {
@@ -24173,11 +24283,9 @@ fn compile_expr(
             let call = builder.ins().call(alloc_ref, &[class_id_val, field_count_val]);
             let obj_ptr = builder.inst_results(call)[0];
 
-            // Set each field
-            let set_field_func = extern_funcs.get("js_object_set_field_f64")
-                .ok_or_else(|| anyhow!("js_object_set_field_f64 not declared"))?;
-            let set_field_ref = module.declare_func_in_func(*set_field_func, builder.func);
-
+            // Set each field using direct memory stores
+            // ObjectHeader is 24 bytes (4x u32 + 1 pointer), fields start at offset 24
+            // Each field is f64 (8 bytes)
             for (i, (_key, value_expr)) in props.iter().enumerate() {
                 // Compile the value expression
                 let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value_expr, this_ctx)?;
@@ -24198,20 +24306,12 @@ fn compile_expr(
                     let nanbox_call = builder.ins().call(nanbox_ref, &[str_ptr]);
                     builder.inst_results(nanbox_call)[0]
                 } else {
-                    // Ensure value is f64 for object field storage
-                    let val_type = builder.func.dfg.value_type(val);
-                    if val_type == types::I64 {
-                        builder.ins().bitcast(types::F64, MemFlags::new(), val)
-                    } else {
-                        val
-                    }
+                    ensure_f64(builder, val)
                 };
 
-                // Set the field at index i
-                let field_idx = builder.ins().iconst(types::I32, i as i64);
-                // Ensure obj_ptr is i64 (it should be, but make it explicit)
-                let obj_ptr_i64 = ensure_i64(builder, obj_ptr);
-                builder.ins().call(set_field_ref, &[obj_ptr_i64, field_idx, final_val]);
+                // Direct store: obj_ptr + 24 + i*8
+                let offset = (24 + i * 8) as i32;
+                builder.ins().store(MemFlags::new(), final_val, obj_ptr, offset);
             }
 
             // Create a keys array containing the property names as strings
@@ -25211,6 +25311,7 @@ fn compile_expr(
                 ("ws", true, "receive") => "js_ws_receive",
                 ("ws", true, "messageCount") => "js_ws_message_count",
                 ("ws", true, "waitForMessage") => "js_ws_wait_for_message",
+                ("ws", true, "on") => "js_ws_on",
 
                 // events module (EventEmitter)
                 ("events", true, "on") => "js_event_emitter_on",
@@ -25928,7 +26029,7 @@ fn compile_expr(
                         _ => {}
                     }
                 } else if native_module == "ws" {
-                    // ws methods: send(message), close(), isOpen(), receive(), messageCount(), waitForMessage(timeout)
+                    // ws methods: send(message), close(), isOpen(), receive(), messageCount(), waitForMessage(timeout), on(event, cb)
                     match method.as_str() {
                         "send" => {
                             // send(message) - message is NaN-boxed string
@@ -25940,6 +26041,20 @@ fn compile_expr(
                                 let msg_call = builder.ins().call(get_str_ptr_ref, &[msg_f64]);
                                 let msg_ptr = builder.inst_results(msg_call)[0];
                                 call_args.push(msg_ptr);
+                            }
+                        }
+                        "on" => {
+                            // on(eventName, callback) - eventName is NaN-boxed string, callback is closure
+                            if arg_vals.len() >= 2 {
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                let event_f64 = ensure_f64(builder, arg_vals[0]);
+                                let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
+                                let event_ptr = builder.inst_results(event_call)[0];
+                                let callback_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1]);
+                                call_args.push(event_ptr);
+                                call_args.push(callback_ptr);
                             }
                         }
                         "waitForMessage" => {

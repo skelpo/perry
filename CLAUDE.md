@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.97
+**Current Version:** 0.2.98
 
 ## Workflow Requirements
 
@@ -238,6 +238,28 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.98
+- Add `WebSocketServer` from `ws` module
+  - `new WebSocketServer({ port })` creates a server and starts listening immediately
+  - `wss.on('connection', (ws) => ...)` handles new client connections
+  - `wss.on('error', (error) => ...)` handles server errors
+  - `wss.on('listening', () => ...)` fires when bound to port
+  - `wss.close()` shuts down server and closes all client connections
+  - Per-client events: `ws.on('message', cb)`, `ws.on('close', cb)`, `ws.on('error', cb)`
+  - Per-client methods: `ws.send(data)`, `ws.close()`
+  - Unified `js_ws_on()` function handles both server and client `.on()` calls
+  - Thread-safe event dispatch: async events queued to `WS_PENDING_EVENTS`, processed on main thread via `js_ws_process_pending()` during `js_stdlib_process_pending()`
+  - Closure callbacks invoked on main thread to avoid thread-local arena issues
+  - Server uses `tokio::net::TcpListener` + `tokio_tungstenite::accept_async` for WebSocket upgrade
+  - Graceful shutdown via `mpsc` channel from `js_ws_server_close`
+  - `js_ws_close()` auto-detects server vs client handle at runtime
+  - Added `"WebSocketServer"` to all 4 class-to-module mappings in HIR lowering
+  - Added `"WebSocketServer"` to native parent extends clause for inheritance support
+  - Added extern declarations: `js_ws_server_new`, `js_ws_on`, `js_ws_server_close`
+  - Added `Expr::New` codegen for `new WebSocketServer({ port })`
+  - Added NativeMethodCall dispatch for `("ws", true, "on")`
+  - Options object port extraction via `js_object_get_field_by_name`
 
 ### v0.2.97
 - Add `AsyncLocalStorage` from `async_hooks` / `node:async_hooks`

@@ -856,7 +856,7 @@ fn lower_module_decl(
                                     let module_name = match class_name {
                                         "EventEmitter" => Some("events"),
                                         "AsyncLocalStorage" => Some("async_hooks"),
-                                        "WebSocket" => Some("ws"),
+                                        "WebSocket" | "WebSocketServer" => Some("ws"),
                                         "Redis" => Some("ioredis"),
                                         "LRUCache" => Some("lru-cache"),
                                         "Command" => Some("commander"),
@@ -883,7 +883,7 @@ fn lower_module_decl(
                                         let module_name = match class_name {
                                             "EventEmitter" => Some("events"),
                                             "AsyncLocalStorage" => Some("async_hooks"),
-                                            "WebSocket" => Some("ws"),
+                                            "WebSocket" | "WebSocketServer" => Some("ws"),
                                             "Redis" => Some("ioredis"),
                                             "LRUCache" => Some("lru-cache"),
                                             "Command" => Some("commander"),
@@ -1716,6 +1716,7 @@ fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::ClassDecl, is_e
             let native_parent = match parent_name.as_str() {
                 "EventEmitter" => Some(("events".to_string(), "EventEmitter".to_string())),
                 "AsyncLocalStorage" => Some(("async_hooks".to_string(), "AsyncLocalStorage".to_string())),
+                "WebSocketServer" => Some(("ws".to_string(), "WebSocketServer".to_string())),
                 _ => None,
             };
             if native_parent.is_some() {
@@ -6501,7 +6502,7 @@ fn lower_var_decl_with_destructuring(
                         let module_name = match class_name {
                             "EventEmitter" => Some("events"),
                             "AsyncLocalStorage" => Some("async_hooks"),
-                            "WebSocket" => Some("ws"),
+                            "WebSocket" | "WebSocketServer" => Some("ws"),
                             "Redis" => Some("ioredis"),
                             "LRUCache" => Some("lru-cache"),
                             "Command" => Some("commander"),
@@ -6530,7 +6531,7 @@ fn lower_var_decl_with_destructuring(
                             let module_name = match class_name {
                                 "EventEmitter" => Some("events"),
                                 "AsyncLocalStorage" => Some("async_hooks"),
-                                "WebSocket" => Some("ws"),
+                                "WebSocket" | "WebSocketServer" => Some("ws"),
                                 "Redis" => Some("ioredis"),
                                 "LRUCache" => Some("lru-cache"),
                                 "Command" => Some("commander"),
