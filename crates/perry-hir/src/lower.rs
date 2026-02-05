@@ -746,18 +746,42 @@ pub fn lower_module(ast_module: &ast::Module, name: &str, source_file_path: &str
     // multiple signature-only declarations precede a single implementation
     let mut functions_with_bodies: std::collections::HashSet<String> = std::collections::HashSet::new();
     for item in &ast_module.body {
-        if let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(fn_decl))) = item {
+        let fn_decl = match item {
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(fn_decl))) => Some(fn_decl),
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export_decl)) => {
+                if let ast::Decl::Fn(fn_decl) = &export_decl.decl {
+                    Some(fn_decl)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(fn_decl) = fn_decl {
             if fn_decl.function.body.is_some() {
                 functions_with_bodies.insert(fn_decl.ident.sym.to_string());
             }
         }
     }
 
-    // First pass: collect all function declarations
+    // First pass: collect all function declarations (both exported and non-exported)
     // Skip 'declare function' statements (functions with no body) - they are external FFI
     // BUT: also skip overload signatures if an implementation exists
     for item in &ast_module.body {
-        if let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(fn_decl))) = item {
+        // Extract function declaration from both regular statements and export declarations
+        let fn_decl = match item {
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(fn_decl))) => Some(fn_decl),
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export_decl)) => {
+                if let ast::Decl::Fn(fn_decl) = &export_decl.decl {
+                    Some(fn_decl)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(fn_decl) = fn_decl {
             let func_name = fn_decl.ident.sym.to_string();
 
             // Skip signature-only declarations (no body)

@@ -4974,6 +4974,17 @@ impl Compiler {
             self.extern_funcs.insert("js_stdlib_process_pending".to_string(), func_id);
         }
 
+        // js_stdlib_init_dispatch() - registers handle method dispatch for native modules
+        {
+            let sig = self.module.make_signature();
+            let func_id = self.module.declare_function(
+                "js_stdlib_init_dispatch",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_stdlib_init_dispatch".to_string(), func_id);
+        }
+
         // ========================================================================
         // UUID Functions
         // ========================================================================
@@ -10876,6 +10887,15 @@ impl Compiler {
             let entry_block = builder.create_block();
             builder.switch_to_block(entry_block);
             builder.seal_block(entry_block);
+
+            // Initialize handle method dispatch (must be before any module inits)
+            // This allows js_native_call_method to handle Fastify/ioredis handles
+            if self.is_entry_module {
+                if let Some(init_dispatch_id) = self.extern_funcs.get("js_stdlib_init_dispatch") {
+                    let init_dispatch_ref = self.module.declare_func_in_func(*init_dispatch_id, builder.func);
+                    builder.ins().call(init_dispatch_ref, &[]);
+                }
+            }
 
             // Initialize JS runtime at the start of main() if needed
             if let Some(init_func_id) = js_runtime_init_id {
@@ -16808,7 +16828,7 @@ fn compile_expr(
             let capacity = builder.ins().iconst(types::I32, 4); // Initial capacity of 4
             let call = builder.ins().call(alloc_ref, &[capacity]);
             let map_ptr = builder.inst_results(call)[0];
-            // Return as f64 (NaN-boxed pointer)
+            // Return as f64 (raw bitcast from i64 pointer)
             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), map_ptr))
         }
         Expr::MapSet { map, key, value } => {
@@ -16995,7 +17015,7 @@ fn compile_expr(
             let capacity = builder.ins().iconst(types::I32, 4); // Initial capacity of 4
             let call = builder.ins().call(alloc_ref, &[capacity]);
             let set_ptr = builder.inst_results(call)[0];
-            // Return as f64 (NaN-boxed pointer)
+            // Return as f64 (raw bitcast from i64 pointer)
             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), set_ptr))
         }
         Expr::SetAdd { set_id, value } => {
@@ -23726,7 +23746,12 @@ fn compile_expr(
                     return Ok(len_f64);
                 }
 
-                let obj_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), obj_val);
+                // Extract raw pointer from NaN-boxed value
+                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                let call = builder.ins().call(get_ptr_ref, &[obj_val]);
+                let obj_ptr = builder.inst_results(call)[0];
 
                 // Create a string for the property name
                 let prop_bytes = property.as_bytes();
@@ -23752,13 +23777,11 @@ fn compile_expr(
                 let key_str_ptr = builder.inst_results(str_call)[0];
 
                 // Call js_object_get_field_by_name_f64
-                // Ensure both arguments are i64
-                let obj_ptr_i64 = ensure_i64(builder, obj_ptr);
                 let key_str_ptr_i64 = ensure_i64(builder, key_str_ptr);
                 let get_func = extern_funcs.get("js_object_get_field_by_name_f64")
                     .ok_or_else(|| anyhow!("js_object_get_field_by_name_f64 not declared"))?;
                 let get_ref = module.declare_func_in_func(*get_func, builder.func);
-                let call = builder.ins().call(get_ref, &[obj_ptr_i64, key_str_ptr_i64]);
+                let call = builder.ins().call(get_ref, &[obj_ptr, key_str_ptr_i64]);
                 return Ok(builder.inst_results(call)[0]);
             }
 

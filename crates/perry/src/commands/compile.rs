@@ -755,11 +755,84 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let entry_path = args.input.canonicalize().unwrap_or_else(|_| args.input.clone());
 
     // Collect non-entry module names for init function calls
-    let non_entry_module_names: Vec<String> = ctx.native_modules
-        .iter()
-        .filter(|(path, _)| *path != &entry_path)
-        .map(|(_, hir_module)| hir_module.name.clone())
-        .collect();
+    // Topologically sort by import dependencies so that if module A imports from module B,
+    // module B is initialized first. This ensures module-level variables (e.g., Maps) are
+    // allocated before other modules try to use them via imported functions.
+    let non_entry_module_names: Vec<String> = {
+        // Build path->name mapping and dependency graph
+        let mut path_to_name: HashMap<PathBuf, String> = HashMap::new();
+        let mut name_to_path: HashMap<String, PathBuf> = HashMap::new();
+        let mut deps: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+
+        for (path, hir_module) in &ctx.native_modules {
+            if *path == entry_path {
+                continue;
+            }
+            path_to_name.insert(path.clone(), hir_module.name.clone());
+            name_to_path.insert(hir_module.name.clone(), path.clone());
+
+            let mut module_deps = Vec::new();
+            for import in &hir_module.imports {
+                if let Some(ref resolved) = import.resolved_path {
+                    let resolved_path = PathBuf::from(resolved);
+                    if resolved_path != entry_path && ctx.native_modules.contains_key(&resolved_path) {
+                        module_deps.push(resolved_path);
+                    }
+                }
+            }
+            deps.insert(path.clone(), module_deps);
+        }
+
+        // Topological sort using Kahn's algorithm
+        let mut in_degree: HashMap<PathBuf, usize> = HashMap::new();
+        for (path, _) in &path_to_name {
+            in_degree.insert(path.clone(), 0);
+        }
+        for (_, module_deps) in &deps {
+            for dep in module_deps {
+                if let Some(count) = in_degree.get_mut(dep) {
+                    *count += 1;
+                }
+            }
+        }
+
+        let mut queue: Vec<PathBuf> = in_degree.iter()
+            .filter(|(_, &count)| count == 0)
+            .map(|(path, _)| path.clone())
+            .collect();
+        queue.sort(); // deterministic order for modules with same in-degree
+
+        let mut sorted = Vec::new();
+        while let Some(path) = queue.pop() {
+            if let Some(name) = path_to_name.get(&path) {
+                sorted.push(name.clone());
+            }
+            if let Some(module_deps) = deps.get(&path) {
+                for dep in module_deps {
+                    if let Some(count) = in_degree.get_mut(dep) {
+                        *count -= 1;
+                        if *count == 0 {
+                            queue.push(dep.clone());
+                            queue.sort();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add any remaining modules not reached by the sort (cycle protection)
+        for (path, name) in &path_to_name {
+            if !sorted.contains(name) {
+                sorted.push(name.clone());
+            }
+        }
+
+        // Reverse: dependencies should be initialized first (they have no dependents)
+        // Kahn's gives us "leaves first" (no incoming edges = no one depends on them)
+        // We want "roots first" (modules that others depend on)
+        sorted.reverse();
+        sorted
+    };
 
     // Build a map of all exported classes from all modules
     // Key: (resolved_path, class_name) -> Class reference

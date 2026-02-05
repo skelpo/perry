@@ -17,6 +17,25 @@ use std::sync::RwLock;
 /// Global class registry mapping class_id -> parent_class_id for inheritance chain lookups
 static CLASS_REGISTRY: RwLock<Option<HashMap<u32, u32>>> = RwLock::new(None);
 
+/// Function pointer type for dispatching method calls on handle-based objects.
+/// Handle-based objects use small integer IDs (1, 2, 3...) instead of real heap pointers.
+/// This is registered by perry-stdlib to dispatch to Fastify, ioredis, etc.
+type HandleMethodDispatchFn = unsafe extern "C" fn(
+    handle: i64,
+    method_name_ptr: *const u8,
+    method_name_len: usize,
+    args_ptr: *const f64,
+    args_len: usize,
+) -> f64;
+
+static mut HANDLE_METHOD_DISPATCH: Option<HandleMethodDispatchFn> = None;
+
+/// Register a function to handle method calls on handle-based objects
+#[no_mangle]
+pub unsafe extern "C" fn js_register_handle_method_dispatch(f: HandleMethodDispatchFn) {
+    HANDLE_METHOD_DISPATCH = Some(f);
+}
+
 /// Register a class with its parent class ID in the global registry
 fn register_class(class_id: u32, parent_class_id: u32) {
     let mut registry = CLASS_REGISTRY.write().unwrap();
@@ -565,6 +584,27 @@ pub unsafe extern "C" fn js_native_call_method(
     };
 
     let jsval = JSValue::from_bits(object.to_bits());
+
+    // Check if this is a handle-based object (small integer, not a real heap pointer)
+    // Handles are used by Fastify, ioredis, and other native modules that store
+    // objects in a registry and use integer IDs to reference them.
+    if jsval.is_pointer() {
+        let raw_ptr = jsval.as_pointer::<u8>() as usize;
+        if raw_ptr > 0 && raw_ptr < 0x100000 {
+            // This is a handle, not a real memory pointer - dispatch to stdlib
+            if let Some(dispatch) = HANDLE_METHOD_DISPATCH {
+                return dispatch(
+                    raw_ptr as i64,
+                    method_name.as_ptr(),
+                    method_name.len(),
+                    args_ptr,
+                    args_len,
+                );
+            }
+            // No dispatcher registered, return undefined
+            return f64::from_bits(0x7FF8_0000_0000_0001);
+        }
+    }
 
     // Handle common method calls
     match method_name {

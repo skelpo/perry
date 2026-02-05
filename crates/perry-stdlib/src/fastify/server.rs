@@ -290,12 +290,15 @@ fn event_loop(app_handle: Handle, request_rx: &mut mpsc::Receiver<FastifyPending
             // Find matching route and call handler
             let mut response_sent = false;
 
+            // NaN-box the context handle with POINTER_TAG for hook calls
+            let nanboxed_ctx_for_hooks = f64::from_bits(0x7FFD_0000_0000_0000 | (ctx_handle as u64 & 0x0000_FFFF_FFFF_FFFF));
+
             // Run preHandler hooks
             for hook in &app.hooks.pre_handler {
                 unsafe {
                     // Call hook(request, reply) - both are the context for simplicity
                     let closure_ptr = *hook as *const perry_runtime::ClosureHeader;
-                    perry_runtime::js_closure_call2(closure_ptr, ctx_handle as f64, ctx_handle as f64);
+                    perry_runtime::js_closure_call2(closure_ptr, nanboxed_ctx_for_hooks, nanboxed_ctx_for_hooks);
                 }
             }
 
@@ -303,10 +306,14 @@ fn event_loop(app_handle: Handle, request_rx: &mut mpsc::Receiver<FastifyPending
             if let Some((route, _)) = app.match_route(&pending.method, &pending.path) {
                 let handler = route.handler;
 
-                // Call handler and get result
+                // NaN-box the context handle with POINTER_TAG so it can be dispatched
+                // by js_native_call_method when the handler calls request/reply methods
+                let nanboxed_ctx = f64::from_bits(0x7FFD_0000_0000_0000 | (ctx_handle as u64 & 0x0000_FFFF_FFFF_FFFF));
+
+                // Call handler(request, reply) - both are the context handle
                 let result = unsafe {
                     let closure_ptr = handler as *const perry_runtime::ClosureHeader;
-                    perry_runtime::js_closure_call1(closure_ptr, ctx_handle as f64)
+                    perry_runtime::js_closure_call2(closure_ptr, nanboxed_ctx, nanboxed_ctx)
                 };
 
                 // Process any async operations

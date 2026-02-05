@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.101
+**Current Version:** 0.2.102
 
 ## Workflow Requirements
 
@@ -238,6 +238,36 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.102
+- Fix function inlining emitting `return` terminators mid-block inside for loops
+  - Root cause: `try_inline_call` in inline.rs inlined function bodies including `Stmt::Return` statements
+  - When a function call like `foo(30)` was used as a `Stmt::Expr` (result discarded) inside a for loop,
+    the inlined `return n + 1` became a Cranelift `return` instruction in the loop body block
+  - This caused "a terminator instruction was encountered before the end of block" verifier errors
+  - Fix: In `Stmt::Expr` context, convert trailing `Stmt::Return(Some(expr))` to `Stmt::Expr(expr)`
+    (evaluate and discard) and skip inlining when non-trailing returns exist (early returns in if branches)
+- Add handle-based method dispatch for Fastify cross-module calls
+  - When `app` (Fastify handle) is passed to functions in other modules as a generic parameter,
+    codegen can't statically determine the type for method calls like `app.get('/route', handler)`
+  - Added `js_handle_method_dispatch` in perry-stdlib with registration via `js_register_handle_method_dispatch`
+  - perry-runtime's `js_native_call_method` now detects small pointers (< 0x100000) as handles
+    and routes to the registered dispatch function
+  - Supports all Fastify app methods (get/post/put/delete/etc.) and context methods (send/status/header/etc.)
+- Fix Fastify route handlers receiving wrong number of arguments
+  - Changed from `js_closure_call1` to `js_closure_call2` with NaN-boxed context handles for both request and reply
+- Fix Fastify JSON response serialization returning "[object Object]"
+  - Use `js_json_stringify` for pointer values in `jsvalue_to_json_string` instead of `js_jsvalue_to_string`
+- Fix Map/Set reallocation invalidating header pointers
+  - MapHeader and SetHeader now use a separate entries/elements pointer instead of inline storage
+  - Reallocation only changes the pointer, not the header address
+- Fix cross-module PropertyGet using bitcast instead of NaN-box pointer extraction
+  - ExternFuncRef PropertyGet now uses `js_nanbox_get_pointer` to properly extract object pointers
+- Fix exported function pre-registration in HIR lowering
+  - Functions declared after first use (e.g., hoisted function declarations) now get pre-registered
+- Add topological sorting for module initialization order
+  - Modules are now initialized in dependency order to ensure module-level variables are allocated
+    before other modules try to use them via imported functions
 
 ### v0.2.101
 - Fix Cranelift verifier error "arg 2 has type i32, expected f64" in closure capture storage

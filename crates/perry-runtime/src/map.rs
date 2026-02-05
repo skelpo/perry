@@ -1,42 +1,41 @@
 //! Map representation for Perry
 //!
-//! Maps are heap-allocated with a header containing:
-//! - Size (number of entries)
-//! - Capacity
-//! - Entries array (inline) - each entry is key + value (both f64/JSValue)
+//! Maps are heap-allocated with a stable header pointer.
+//! The entries array is separately allocated and can be reallocated
+//! without changing the MapHeader address.
 
-use std::alloc::{alloc, realloc, Layout};
+use std::alloc::{alloc, dealloc, realloc, Layout};
 use std::ptr;
 use crate::string::StringHeader;
 
-/// Map header - precedes the entries in memory
+/// Map header - stable address, entries allocated separately
 #[repr(C)]
 pub struct MapHeader {
     /// Number of key-value pairs in the map
     pub size: u32,
     /// Capacity (allocated space for entries)
     pub capacity: u32,
+    /// Pointer to entries array (separately allocated)
+    pub entries: *mut f64,
 }
 
 /// Each map entry is 16 bytes (key + value, both as f64/JSValue)
 const ENTRY_SIZE: usize = 16;
 
-/// Calculate the layout for a map with N entries capacity
-fn map_layout(capacity: usize) -> Layout {
-    let header_size = std::mem::size_of::<MapHeader>();
+/// Calculate the layout for an entries array with N entries capacity
+fn entries_layout(capacity: usize) -> Layout {
     let entries_size = capacity * ENTRY_SIZE;
-    let total_size = header_size + entries_size;
-    Layout::from_size_align(total_size, 8).unwrap()
+    Layout::from_size_align(entries_size.max(8), 8).unwrap()
 }
 
 /// Get pointer to entries array
 unsafe fn entries_ptr(map: *const MapHeader) -> *const f64 {
-    (map as *const u8).add(std::mem::size_of::<MapHeader>()) as *const f64
+    (*map).entries as *const f64
 }
 
 /// Get mutable pointer to entries array
 unsafe fn entries_ptr_mut(map: *mut MapHeader) -> *mut f64 {
-    (map as *mut u8).add(std::mem::size_of::<MapHeader>()) as *mut f64
+    (*map).entries
 }
 
 /// Check if a value looks like a heap pointer (raw pointer stored in f64)
@@ -105,16 +104,22 @@ fn jsvalue_eq(a: f64, b: f64) -> bool {
 #[no_mangle]
 pub extern "C" fn js_map_alloc(capacity: u32) -> *mut MapHeader {
     let cap = if capacity == 0 { 4 } else { capacity };
-    let layout = map_layout(cap as usize);
+    let header_layout = Layout::new::<MapHeader>();
+    let ent_layout = entries_layout(cap as usize);
     unsafe {
-        let ptr = alloc(layout) as *mut MapHeader;
+        let ptr = alloc(header_layout) as *mut MapHeader;
         if ptr.is_null() {
-            panic!("Failed to allocate map");
+            panic!("Failed to allocate map header");
+        }
+        let entries = alloc(ent_layout) as *mut f64;
+        if entries.is_null() {
+            panic!("Failed to allocate map entries");
         }
 
         // Initialize header
         (*ptr).size = 0;
         (*ptr).capacity = cap;
+        (*ptr).entries = entries;
 
         ptr
     }
@@ -141,31 +146,31 @@ unsafe fn find_key_index(map: *const MapHeader, key: f64) -> i32 {
     -1
 }
 
-/// Grow the map if needed
-unsafe fn ensure_capacity(map: *mut MapHeader) -> *mut MapHeader {
+/// Grow the entries array if needed (header stays at same address)
+unsafe fn ensure_capacity(map: *mut MapHeader) {
     let size = (*map).size;
     let capacity = (*map).capacity;
 
     if size < capacity {
-        return map;
+        return;
     }
 
     // Double the capacity
     let new_capacity = capacity * 2;
-    let old_layout = map_layout(capacity as usize);
-    let new_layout = map_layout(new_capacity as usize);
+    let old_layout = entries_layout(capacity as usize);
+    let new_layout = entries_layout(new_capacity as usize);
 
-    let new_ptr = realloc(map as *mut u8, old_layout, new_layout.size()) as *mut MapHeader;
-    if new_ptr.is_null() {
-        panic!("Failed to grow map");
+    let new_entries = realloc((*map).entries as *mut u8, old_layout, new_layout.size()) as *mut f64;
+    if new_entries.is_null() {
+        panic!("Failed to grow map entries");
     }
 
-    (*new_ptr).capacity = new_capacity;
-    new_ptr
+    (*map).entries = new_entries;
+    (*map).capacity = new_capacity;
 }
 
 /// Set a key-value pair in the map
-/// Returns the (possibly reallocated) map pointer
+/// The map pointer is stable (never reallocated)
 #[no_mangle]
 pub extern "C" fn js_map_set(map: *mut MapHeader, key: f64, value: f64) -> *mut MapHeader {
     unsafe {
@@ -180,7 +185,7 @@ pub extern "C" fn js_map_set(map: *mut MapHeader, key: f64, value: f64) -> *mut 
         }
 
         // Key doesn't exist, need to add new entry
-        let map = ensure_capacity(map);
+        ensure_capacity(map);
         let size = (*map).size;
         let entries = entries_ptr_mut(map);
 

@@ -1,42 +1,41 @@
 //! Set representation for Perry
 //!
-//! Sets are heap-allocated with a header containing:
-//! - Size (number of elements)
-//! - Capacity
-//! - Elements array (inline) - each element is f64/JSValue
+//! Sets are heap-allocated with a stable header pointer.
+//! The elements array is separately allocated and can be reallocated
+//! without changing the SetHeader address.
 
 use std::alloc::{alloc, realloc, Layout};
 use std::ptr;
 use crate::string::StringHeader;
 
-/// Set header - precedes the elements in memory
+/// Set header - stable address, elements allocated separately
 #[repr(C)]
 pub struct SetHeader {
     /// Number of elements in the set
     pub size: u32,
     /// Capacity (allocated space for elements)
     pub capacity: u32,
+    /// Pointer to elements array (separately allocated)
+    pub elements: *mut f64,
 }
 
 /// Each set element is 8 bytes (f64/JSValue)
 const ELEMENT_SIZE: usize = 8;
 
-/// Calculate the layout for a set with N elements capacity
-fn set_layout(capacity: usize) -> Layout {
-    let header_size = std::mem::size_of::<SetHeader>();
+/// Calculate the layout for an elements array with N elements capacity
+fn elements_layout(capacity: usize) -> Layout {
     let elements_size = capacity * ELEMENT_SIZE;
-    let total_size = header_size + elements_size;
-    Layout::from_size_align(total_size, 8).unwrap()
+    Layout::from_size_align(elements_size.max(8), 8).unwrap()
 }
 
 /// Get pointer to elements array
 unsafe fn elements_ptr(set: *const SetHeader) -> *const f64 {
-    (set as *const u8).add(std::mem::size_of::<SetHeader>()) as *const f64
+    (*set).elements as *const f64
 }
 
 /// Get mutable pointer to elements array
 unsafe fn elements_ptr_mut(set: *mut SetHeader) -> *mut f64 {
-    (set as *mut u8).add(std::mem::size_of::<SetHeader>()) as *mut f64
+    (*set).elements
 }
 
 /// Check if a value looks like a heap pointer (raw pointer stored in f64)
@@ -107,43 +106,49 @@ unsafe fn find_value_index(set: *const SetHeader, value: f64) -> i32 {
     -1
 }
 
-/// Grow the set if needed
-unsafe fn ensure_capacity(set: *mut SetHeader) -> *mut SetHeader {
+/// Grow the elements array if needed (header stays at same address)
+unsafe fn ensure_capacity(set: *mut SetHeader) {
     let size = (*set).size;
     let capacity = (*set).capacity;
 
     if size < capacity {
-        return set;
+        return;
     }
 
     // Double the capacity
     let new_capacity = capacity * 2;
-    let old_layout = set_layout(capacity as usize);
-    let new_layout = set_layout(new_capacity as usize);
+    let old_layout = elements_layout(capacity as usize);
+    let new_layout = elements_layout(new_capacity as usize);
 
-    let new_ptr = realloc(set as *mut u8, old_layout, new_layout.size()) as *mut SetHeader;
-    if new_ptr.is_null() {
-        panic!("Failed to grow set");
+    let new_elements = realloc((*set).elements as *mut u8, old_layout, new_layout.size()) as *mut f64;
+    if new_elements.is_null() {
+        panic!("Failed to grow set elements");
     }
 
-    (*new_ptr).capacity = new_capacity;
-    new_ptr
+    (*set).elements = new_elements;
+    (*set).capacity = new_capacity;
 }
 
 /// Allocate a new empty set with the given initial capacity
 #[no_mangle]
 pub extern "C" fn js_set_alloc(capacity: u32) -> *mut SetHeader {
     let cap = if capacity == 0 { 4 } else { capacity };
-    let layout = set_layout(cap as usize);
+    let header_layout = Layout::new::<SetHeader>();
+    let elem_layout = elements_layout(cap as usize);
     unsafe {
-        let ptr = alloc(layout) as *mut SetHeader;
+        let ptr = alloc(header_layout) as *mut SetHeader;
         if ptr.is_null() {
-            panic!("Failed to allocate set");
+            panic!("Failed to allocate set header");
+        }
+        let elements = alloc(elem_layout) as *mut f64;
+        if elements.is_null() {
+            panic!("Failed to allocate set elements");
         }
 
         // Initialize header
         (*ptr).size = 0;
         (*ptr).capacity = cap;
+        (*ptr).elements = elements;
 
         ptr
     }
@@ -156,7 +161,7 @@ pub extern "C" fn js_set_size(set: *const SetHeader) -> u32 {
 }
 
 /// Add a value to the set
-/// Returns the (possibly reallocated) set pointer
+/// Returns the set pointer (always the same, stable address)
 #[no_mangle]
 pub extern "C" fn js_set_add(set: *mut SetHeader, value: f64) -> *mut SetHeader {
     unsafe {
@@ -169,7 +174,7 @@ pub extern "C" fn js_set_add(set: *mut SetHeader, value: f64) -> *mut SetHeader 
         }
 
         // Value doesn't exist, need to add it
-        let set = ensure_capacity(set);
+        ensure_capacity(set);
         let size = (*set).size;
         let elements = elements_ptr_mut(set);
 
