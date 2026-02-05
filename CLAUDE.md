@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.100
+**Current Version:** 0.2.101
 
 ## Workflow Requirements
 
@@ -238,6 +238,16 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.101
+- Fix Cranelift verifier error "arg 2 has type i32, expected f64" in closure capture storage
+  - Root cause: Loop counter optimization produces i32 values, but closure capture storage
+    (`js_closure_set_capture_f64`) expects f64 for all captured values
+  - When a loop counter variable (optimized to i32) is captured by a closure (e.g., async arrow
+    in `batch.map(async (pool, index) => { ... })` capturing outer `i`), the i32 value was
+    stored directly without conversion
+  - Fixed both mutable and immutable capture paths to convert i32→f64 via `fcvt_from_sint`
+    before storing in closure environment
 
 ### v0.2.100
 - Fix default parameter expansion using wrong scope for parameter references

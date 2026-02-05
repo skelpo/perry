@@ -24982,6 +24982,9 @@ fn compile_expr(
                             let val_type = builder.func.dfg.value_type(val);
                             let val_f64 = if val_type == types::I64 {
                                 builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                            } else if val_type == types::I32 {
+                                // Loop counter optimization can produce i32 values
+                                builder.ins().fcvt_from_sint(types::F64, val)
                             } else {
                                 val
                             };
@@ -24994,7 +24997,10 @@ fn compile_expr(
                             // For immutable captures, store the value directly
                             // Ensure it's f64 for closure storage
                             let val_type = builder.func.dfg.value_type(val);
-                            if val_type == types::I64 {
+                            if val_type == types::I32 {
+                                // Loop counter optimization can produce i32 values
+                                builder.ins().fcvt_from_sint(types::F64, val)
+                            } else if val_type == types::I64 {
                                 // If capturing a string pointer, NaN-box it with STRING_TAG
                                 // so it can be properly identified and handled later
                                 if info.is_string {
