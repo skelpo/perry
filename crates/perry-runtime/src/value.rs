@@ -905,6 +905,18 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
         return f64::from_bits(TAG_UNDEFINED);
     }
 
+    // Check if this is a handle-based object (small integer, not a real heap pointer)
+    if ptr < 0x100000 {
+        if let Some(dispatch) = crate::object::HANDLE_PROPERTY_DISPATCH {
+            return dispatch(
+                ptr as i64,
+                property_name_ptr as *const u8,
+                property_name_len,
+            );
+        }
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+
     // Get the key string
     let name_slice = if property_name_ptr.is_null() {
         return f64::from_bits(TAG_UNDEFINED);

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.102
+**Current Version:** 0.2.103
 
 ## Workflow Requirements
 
@@ -238,6 +238,17 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.103
+- Fix SIGSEGV when accessing properties on Fastify handle-based objects (request.query, request.params, etc.)
+  - Root cause: Handle-based objects (small integer IDs NaN-boxed with POINTER_TAG) only had dispatch for method calls, not property access
+  - `js_dynamic_object_get_property` would extract the small integer handle and try to dereference it as an ObjectHeader → SIGSEGV
+  - Fix: Added handle property dispatch system parallel to existing method dispatch:
+    - `HANDLE_PROPERTY_DISPATCH` function pointer in `object.rs` (like `HANDLE_METHOD_DISPATCH`)
+    - Handle detection in `js_dynamic_object_get_property` (value.rs): check if extracted pointer < 0x100000
+    - `js_handle_property_dispatch` in dispatch.rs dispatches to FastifyContext properties
+    - Supports: query, params, body, headers, method, url properties on request/reply handles
+  - This fixes the perry-demo benchmark SIGSEGV: `const query = request.query as any` no longer crashes
 
 ### v0.2.102
 - Fix function inlining emitting `return` terminators mid-block inside for loops

@@ -178,8 +178,84 @@ unsafe fn dispatch_fastify_context(handle: i64, method: &str, args: &[f64]) -> f
     }
 }
 
-/// Initialize the handle method dispatch system.
-/// This registers our dispatch function with perry-runtime's js_native_call_method.
+/// Dispatch a property access on a handle-based object.
+/// Called from perry-runtime's js_dynamic_object_get_property when it detects a handle.
+#[no_mangle]
+pub unsafe extern "C" fn js_handle_property_dispatch(
+    handle: i64,
+    property_name_ptr: *const u8,
+    property_name_len: usize,
+) -> f64 {
+    use perry_runtime::JSValue;
+
+    let property_name = if property_name_ptr.is_null() || property_name_len == 0 {
+        ""
+    } else {
+        std::str::from_utf8(std::slice::from_raw_parts(property_name_ptr, property_name_len))
+            .unwrap_or("")
+    };
+
+    // Try Fastify context dispatch (request/reply properties)
+    if with_handle::<crate::fastify::FastifyContext, bool, _>(handle, |_| true).unwrap_or(false) {
+        return match property_name {
+            "query" => {
+                let ptr = crate::fastify::js_fastify_req_query(handle);
+                if ptr.is_null() {
+                    f64::from_bits(0x7FFC_0000_0000_0001) // undefined
+                } else {
+                    JSValue::string_ptr(ptr).bits() as f64
+                }
+            }
+            "params" => {
+                let ptr = crate::fastify::js_fastify_req_params(handle);
+                if ptr.is_null() {
+                    f64::from_bits(0x7FFC_0000_0000_0001)
+                } else {
+                    JSValue::string_ptr(ptr).bits() as f64
+                }
+            }
+            "body" => {
+                let ptr = crate::fastify::js_fastify_req_body(handle);
+                if ptr.is_null() {
+                    f64::from_bits(0x7FFC_0000_0000_0001)
+                } else {
+                    JSValue::string_ptr(ptr).bits() as f64
+                }
+            }
+            "headers" => {
+                let ptr = crate::fastify::js_fastify_req_headers(handle);
+                if ptr.is_null() {
+                    f64::from_bits(0x7FFC_0000_0000_0001)
+                } else {
+                    JSValue::string_ptr(ptr).bits() as f64
+                }
+            }
+            "method" => {
+                let ptr = crate::fastify::js_fastify_req_method(handle);
+                if ptr.is_null() {
+                    f64::from_bits(0x7FFC_0000_0000_0001)
+                } else {
+                    JSValue::string_ptr(ptr).bits() as f64
+                }
+            }
+            "url" => {
+                let ptr = crate::fastify::js_fastify_req_url(handle);
+                if ptr.is_null() {
+                    f64::from_bits(0x7FFC_0000_0000_0001)
+                } else {
+                    JSValue::string_ptr(ptr).bits() as f64
+                }
+            }
+            _ => f64::from_bits(0x7FFC_0000_0000_0001), // undefined
+        };
+    }
+
+    // Unknown handle type - return undefined
+    f64::from_bits(0x7FFC_0000_0000_0001)
+}
+
+/// Initialize the handle method and property dispatch systems.
+/// This registers our dispatch functions with perry-runtime.
 /// Must be called before any user code runs.
 #[no_mangle]
 pub unsafe extern "C" fn js_stdlib_init_dispatch() {
@@ -187,6 +263,10 @@ pub unsafe extern "C" fn js_stdlib_init_dispatch() {
         fn js_register_handle_method_dispatch(
             f: unsafe extern "C" fn(i64, *const u8, usize, *const f64, usize) -> f64,
         );
+        fn js_register_handle_property_dispatch(
+            f: unsafe extern "C" fn(i64, *const u8, usize) -> f64,
+        );
     }
     js_register_handle_method_dispatch(js_handle_method_dispatch);
+    js_register_handle_property_dispatch(js_handle_property_dispatch);
 }

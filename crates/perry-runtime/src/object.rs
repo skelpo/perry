@@ -30,10 +30,25 @@ type HandleMethodDispatchFn = unsafe extern "C" fn(
 
 static mut HANDLE_METHOD_DISPATCH: Option<HandleMethodDispatchFn> = None;
 
+/// Function pointer type for dispatching property access on handle-based objects.
+type HandlePropertyDispatchFn = unsafe extern "C" fn(
+    handle: i64,
+    property_name_ptr: *const u8,
+    property_name_len: usize,
+) -> f64;
+
+pub static mut HANDLE_PROPERTY_DISPATCH: Option<HandlePropertyDispatchFn> = None;
+
 /// Register a function to handle method calls on handle-based objects
 #[no_mangle]
 pub unsafe extern "C" fn js_register_handle_method_dispatch(f: HandleMethodDispatchFn) {
     HANDLE_METHOD_DISPATCH = Some(f);
+}
+
+/// Register a function to handle property access on handle-based objects
+#[no_mangle]
+pub unsafe extern "C" fn js_register_handle_property_dispatch(f: HandlePropertyDispatchFn) {
+    HANDLE_PROPERTY_DISPATCH = Some(f);
 }
 
 /// Register a class with its parent class ID in the global registry
