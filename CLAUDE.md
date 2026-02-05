@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.99
+**Current Version:** 0.2.100
 
 ## Workflow Requirements
 
@@ -238,6 +238,21 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.100
+- Fix default parameter expansion using wrong scope for parameter references
+  - Root cause: When a function with default parameters was called with fewer args than params,
+    the defaults were cloned from the callee's scope and inserted at the call site
+  - Default expressions containing `LocalGet(callee_param_id)` referenced the callee's local IDs,
+    which don't exist in the caller's scope
+  - Example: `function f(a: string, b: string[] = [a])` — the default `[a]` used `LocalGet(0)` from
+    `f`'s scope, but at the call site `LocalGet(0)` doesn't refer to anything valid
+  - Fix: Store parameter LocalIds alongside defaults, build a substitution map from callee param IDs
+    to actual caller argument expressions, and recursively substitute references in default expressions
+  - Also handles chained defaults (e.g., `function f(a, b = a, c = b)`) by building the map
+    incrementally as each default is expanded
+  - Fixes "Undefined local variable" errors when calling functions with fewer args than params
+    where the default value references another parameter
 
 ### v0.2.99
 - Performance optimizations for JSON.stringify, object literals, and recursive function calls

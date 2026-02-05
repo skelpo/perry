@@ -31,8 +31,8 @@ pub struct LoweringContext {
     globals: Vec<(String, GlobalId, Type)>,
     /// Functions: name -> id
     functions: Vec<(String, FuncId)>,
-    /// Function parameter defaults: func_id -> Vec<Option<Expr>> for each param
-    func_defaults: Vec<(FuncId, Vec<Option<Expr>>)>,
+    /// Function parameter defaults: func_id -> (defaults, param_local_ids)
+    func_defaults: Vec<(FuncId, Vec<Option<Expr>>, Vec<LocalId>)>,
     /// Classes: name -> id
     classes: Vec<(String, ClassId)>,
     /// Static members of classes: class_name -> (static_field_names, static_method_names)
@@ -213,10 +213,95 @@ impl LoweringContext {
         self.functions.iter().find(|(n, _)| n == name).map(|(_, id)| *id)
     }
 
-    fn lookup_func_defaults(&self, func_id: FuncId) -> Option<&[Option<Expr>]> {
+    fn lookup_func_defaults(&self, func_id: FuncId) -> Option<(&[Option<Expr>], &[LocalId])> {
         self.func_defaults.iter()
-            .find(|(id, _)| *id == func_id)
-            .map(|(_, defaults)| defaults.as_slice())
+            .find(|(id, _, _)| *id == func_id)
+            .map(|(_, defaults, param_ids)| (defaults.as_slice(), param_ids.as_slice()))
+    }
+
+    /// Substitute parameter references in a default expression.
+    /// Replaces LocalGet(callee_param_id) with the corresponding caller argument expression.
+    fn substitute_param_refs_in_default(expr: &Expr, param_map: &[(LocalId, Expr)]) -> Expr {
+        match expr {
+            Expr::LocalGet(id) => {
+                // Check if this LocalGet references one of the callee's parameters
+                for (param_id, replacement) in param_map {
+                    if id == param_id {
+                        return replacement.clone();
+                    }
+                }
+                // Not a parameter reference - keep as-is
+                expr.clone()
+            }
+            Expr::Array(elements) => {
+                Expr::Array(elements.iter().map(|e| Self::substitute_param_refs_in_default(e, param_map)).collect())
+            }
+            Expr::Object(fields) => {
+                Expr::Object(fields.iter().map(|(k, v)| (k.clone(), Self::substitute_param_refs_in_default(v, param_map))).collect())
+            }
+            Expr::Binary { op, left, right } => {
+                Expr::Binary {
+                    op: *op,
+                    left: Box::new(Self::substitute_param_refs_in_default(left, param_map)),
+                    right: Box::new(Self::substitute_param_refs_in_default(right, param_map)),
+                }
+            }
+            Expr::Compare { op, left, right } => {
+                Expr::Compare {
+                    op: *op,
+                    left: Box::new(Self::substitute_param_refs_in_default(left, param_map)),
+                    right: Box::new(Self::substitute_param_refs_in_default(right, param_map)),
+                }
+            }
+            Expr::Logical { op, left, right } => {
+                Expr::Logical {
+                    op: *op,
+                    left: Box::new(Self::substitute_param_refs_in_default(left, param_map)),
+                    right: Box::new(Self::substitute_param_refs_in_default(right, param_map)),
+                }
+            }
+            Expr::Unary { op, operand } => {
+                Expr::Unary {
+                    op: *op,
+                    operand: Box::new(Self::substitute_param_refs_in_default(operand, param_map)),
+                }
+            }
+            Expr::Call { callee, args, type_args } => {
+                Expr::Call {
+                    callee: Box::new(Self::substitute_param_refs_in_default(callee, param_map)),
+                    args: args.iter().map(|a| Self::substitute_param_refs_in_default(a, param_map)).collect(),
+                    type_args: type_args.clone(),
+                }
+            }
+            Expr::Conditional { condition, then_expr, else_expr } => {
+                Expr::Conditional {
+                    condition: Box::new(Self::substitute_param_refs_in_default(condition, param_map)),
+                    then_expr: Box::new(Self::substitute_param_refs_in_default(then_expr, param_map)),
+                    else_expr: Box::new(Self::substitute_param_refs_in_default(else_expr, param_map)),
+                }
+            }
+            Expr::PropertyGet { object, property } => {
+                Expr::PropertyGet {
+                    object: Box::new(Self::substitute_param_refs_in_default(object, param_map)),
+                    property: property.clone(),
+                }
+            }
+            Expr::IndexGet { object, index } => {
+                Expr::IndexGet {
+                    object: Box::new(Self::substitute_param_refs_in_default(object, param_map)),
+                    index: Box::new(Self::substitute_param_refs_in_default(index, param_map)),
+                }
+            }
+            Expr::New { class_name, args, type_args } => {
+                Expr::New {
+                    class_name: class_name.clone(),
+                    args: args.iter().map(|a| Self::substitute_param_refs_in_default(a, param_map)).collect(),
+                    type_args: type_args.clone(),
+                }
+            }
+            // Leaf expressions that don't contain LocalGet - return as-is
+            _ => expr.clone(),
+        }
     }
 
     fn lookup_imported_func(&self, name: &str) -> Option<&str> {
@@ -832,7 +917,8 @@ fn lower_module_decl(
                     let func_id = func.id;
                     // Store parameter defaults for call-site resolution
                     let defaults: Vec<Option<Expr>> = func.params.iter().map(|p| p.default.clone()).collect();
-                    ctx.func_defaults.push((func.id, defaults));
+                    let param_ids: Vec<LocalId> = func.params.iter().map(|p| p.id).collect();
+                    ctx.func_defaults.push((func.id, defaults, param_ids));
                     module.functions.push(func);
                     // Track in exports
                     module.exports.push(Export::Named {
@@ -1115,7 +1201,8 @@ fn lower_stmt(
                     let func = lower_fn_decl(ctx, fn_decl)?;
                     // Store parameter defaults for call-site resolution
                     let defaults: Vec<Option<Expr>> = func.params.iter().map(|p| p.default.clone()).collect();
-                    ctx.func_defaults.push((func.id, defaults));
+                    let param_ids: Vec<LocalId> = func.params.iter().map(|p| p.id).collect();
+                    ctx.func_defaults.push((func.id, defaults, param_ids));
                     module.functions.push(func);
                 }
                 ast::Decl::Var(var_decl) => {
@@ -4456,11 +4543,30 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                     // Fill in default arguments if callee is a known function
                     let mut args = args;
                     if let Expr::FuncRef(func_id) = &callee_expr {
-                        if let Some(defaults) = ctx.lookup_func_defaults(*func_id) {
-                            // Fill in any missing arguments with their defaults
-                            for i in args.len()..defaults.len() {
+                        if let Some((defaults, param_ids)) = ctx.lookup_func_defaults(*func_id) {
+                            let defaults = defaults.to_vec();
+                            let param_ids = param_ids.to_vec();
+                            let num_provided = args.len();
+                            // Build substitution map: callee param LocalId -> actual arg expression
+                            // For provided args, map to the caller's arg expression
+                            // For defaulted args, map to the expanded default (built incrementally)
+                            let mut param_map: Vec<(LocalId, Expr)> = Vec::new();
+                            for i in 0..param_ids.len().min(num_provided) {
+                                param_map.push((param_ids[i], args[i].clone()));
+                            }
+                            // Fill in missing arguments with their defaults, substituting
+                            // any parameter references to use the caller's scope
+                            for i in num_provided..defaults.len() {
                                 if let Some(default_expr) = &defaults[i] {
-                                    args.push(default_expr.clone());
+                                    let substituted = LoweringContext::substitute_param_refs_in_default(
+                                        default_expr, &param_map
+                                    );
+                                    // Add this expanded default to the map so later defaults
+                                    // can reference it (e.g., c = b where b was also defaulted)
+                                    if i < param_ids.len() {
+                                        param_map.push((param_ids[i], substituted.clone()));
+                                    }
+                                    args.push(substituted);
                                 }
                             }
                         }
