@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.98
+**Current Version:** 0.2.99
 
 ## Workflow Requirements
 
@@ -238,6 +238,13 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.99
+- Performance optimizations for JSON.stringify, object literals, and recursive function calls
+  - **JSON.stringify shared buffer**: Refactored to use internal `stringify_value()` writing to a shared `String` buffer instead of recursive FFI calls and intermediate `StringHeader` allocations. Nested objects/arrays are serialized inline.
+  - **JSON.stringify type hints**: Added `type_hint` parameter (0=unknown, 1=object, 2=array) to skip runtime heuristic detection when the type is known at compile time. Codegen passes hints based on expression type (e.g., `Expr::Object` → 1, `Expr::Array` → 2, `LocalGet` with `is_array` → 2).
+  - **Object literal inline field writes**: Replaced per-field `js_object_set_field_f64` FFI calls with direct Cranelift `store` instructions at offset `24 + i*8` into the `ObjectHeader`. Eliminates N function calls per object literal.
+  - **Self-recursive call fast path**: Added thread-local `CURRENT_FUNC_HIR_ID` tracking. When a function calls itself and argument types already match the signature, skips both conversion passes (union NaN-boxing, signature matching) and calls directly.
 
 ### v0.2.98
 - Add `WebSocketServer` from `ws` module

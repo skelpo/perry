@@ -6,6 +6,7 @@ use perry_runtime::{
     js_array_alloc, js_array_push, js_object_alloc, js_object_set_field,
     js_object_set_keys, js_string_from_bytes, JSValue, StringHeader,
 };
+use std::fmt::Write as FmtWrite;
 
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
@@ -135,6 +136,11 @@ const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
 const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
 const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
+/// Type hint constants for js_json_stringify
+const TYPE_UNKNOWN: u32 = 0;
+const TYPE_OBJECT: u32 = 1;
+const TYPE_ARRAY: u32 = 2;
+
 /// Check if a f64 value might be a raw bitcast pointer (not NaN-boxed).
 /// Raw pointers, when bitcast to f64, appear as subnormal positive numbers
 /// because heap addresses typically only use the lower 48 bits.
@@ -150,306 +156,261 @@ fn is_raw_pointer(bits: u64) -> bool {
     exponent == 0 && mantissa != 0 && sign == 0
 }
 
-/// Get pointer from raw bitcast value
-fn raw_pointer_value(bits: u64) -> *const u8 {
-    bits as *const u8
+/// Extract a pointer from a NaN-boxed or raw value
+unsafe fn extract_pointer(bits: u64) -> Option<*const u8> {
+    let is_nanboxed_ptr = (bits & 0xFFFF_0000_0000_0000) == POINTER_TAG;
+    let is_raw_ptr = is_raw_pointer(bits);
+    if is_nanboxed_ptr {
+        Some((bits & POINTER_MASK) as *const u8)
+    } else if is_raw_ptr {
+        Some(bits as *const u8)
+    } else {
+        None
+    }
 }
 
-/// Generic JSON.stringify that handles any JSValue
-/// Takes a f64 (NaN-boxed JSValue) and returns a string pointer
-#[no_mangle]
-pub unsafe extern "C" fn js_json_stringify(value: f64) -> *mut StringHeader {
+/// Check if a pointer looks like an object (has valid keys array)
+unsafe fn is_object_pointer(ptr: *const u8) -> bool {
+    let obj = ptr as *const perry_runtime::ObjectHeader;
+    let potential_keys_ptr = (*obj).keys_array as u64;
+    let top_16_bits = potential_keys_ptr >> 48;
+    let is_likely_heap_pointer = top_16_bits == 0 || top_16_bits == 1;
+    let looks_like_valid_pointer = is_likely_heap_pointer
+        && potential_keys_ptr > 0x10000
+        && (potential_keys_ptr & 0x7) == 0;
+
+    if looks_like_valid_pointer {
+        let keys_arr = (*obj).keys_array;
+        let keys_len = (*keys_arr).length;
+        let keys_cap = (*keys_arr).capacity;
+        let field_count = (*obj).field_count;
+        keys_len <= keys_cap && keys_len > 0 && keys_cap < 1000 && field_count == keys_len && field_count < 1000
+    } else {
+        false
+    }
+}
+
+/// Write a number to buffer
+unsafe fn write_number(buf: &mut String, value: f64) {
+    if value.is_nan() {
+        buf.push_str("null");
+    } else if value.is_infinite() {
+        buf.push_str("null");
+    } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
+        let _ = write!(buf, "{}", value as i64);
+    } else {
+        let _ = write!(buf, "{}", value);
+    }
+}
+
+/// Write a JSON-escaped string to buffer
+unsafe fn write_escaped_string(buf: &mut String, s: &str) {
+    buf.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => buf.push_str("\\\""),
+            '\\' => buf.push_str("\\\\"),
+            '\n' => buf.push_str("\\n"),
+            '\r' => buf.push_str("\\r"),
+            '\t' => buf.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(buf, "\\u{:04x}", c as u32);
+            }
+            c => buf.push(c),
+        }
+    }
+    buf.push('"');
+}
+
+/// Internal stringify that writes directly into a shared buffer.
+/// type_hint: 0=unknown, 1=object, 2=array
+unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
     let bits: u64 = value.to_bits();
 
     // Check special values
     if bits == TAG_NULL {
-        return js_json_stringify_null();
+        buf.push_str("null");
+        return;
     }
     if bits == TAG_TRUE {
-        return js_json_stringify_bool(true);
+        buf.push_str("true");
+        return;
     }
     if bits == TAG_FALSE {
-        return js_json_stringify_bool(false);
+        buf.push_str("false");
+        return;
     }
 
-    // Check if it's a pointer (array, object, or string)
-    // Handle both NaN-boxed pointers and raw bitcast pointers (from variables)
-    let is_nanboxed_ptr = (bits & 0xFFFF_0000_0000_0000) == POINTER_TAG;
-    let is_raw_ptr = is_raw_pointer(bits);
-
-    if is_nanboxed_ptr || is_raw_ptr {
-        let ptr = if is_nanboxed_ptr {
-            (bits & POINTER_MASK) as *const u8
-        } else {
-            raw_pointer_value(bits)
-        };
-
-        // Read array header fields (we'll use these if it turns out to be an array)
-        let arr = ptr as *const perry_runtime::ArrayHeader;
-        let _arr_len = (*arr).length;
-        let _arr_cap = (*arr).capacity;
-
-        // Determine if this is an object or array
-        // ObjectHeader has: field_count (u32), 4 bytes padding, keys_array (*mut ArrayHeader) at offset 8
-        // ArrayHeader has: length (u32), capacity (u32), elements[] starting at offset 8
-        //
-        // Key insight: At offset 8:
-        // - For arrays: this is the first f64 element (e.g., 1.0 = 0x3FF0_0000_0000_0000)
-        // - For objects: this is a valid heap pointer to the keys array
-        //
-        // Heap pointers on 64-bit systems have the top 16+ bits as zeros (userspace < 2^47)
-        // f64 numbers have exponent bits in positions 52-62, making top 16 bits non-zero for most values
-        let obj = ptr as *const perry_runtime::ObjectHeader;
-        let potential_keys_ptr = (*obj).keys_array as u64;
-
-        // Check if this looks like a heap pointer vs an f64 value:
-        // Heap pointers: top 16 bits are 0 (or 0x0001 on some systems)
-        // f64 numbers: top 16 bits contain sign+exponent (e.g., 0x3FF0 for 1.0, 0x4000 for 2.0)
-        let top_16_bits = potential_keys_ptr >> 48;
-        let is_likely_heap_pointer = top_16_bits == 0 || top_16_bits == 1;
-
-        // Also check it's a reasonable pointer value (not too small, properly aligned)
-        let looks_like_valid_pointer = is_likely_heap_pointer
-            && potential_keys_ptr > 0x10000
-            && (potential_keys_ptr & 0x7) == 0;
-
-        let has_valid_keys = if looks_like_valid_pointer {
-            let keys_arr = (*obj).keys_array;
-            let keys_len = (*keys_arr).length;
-            let keys_cap = (*keys_arr).capacity;
-            let field_count = (*obj).field_count;
-
-            // Valid keys array should have:
-            // - length <= capacity
-            // - length > 0 (objects have at least one key if keys_array is set)
-            // - field_count == keys_len (number of fields equals number of keys)
-            // - reasonable sizes
-            keys_len <= keys_cap && keys_len > 0 && keys_cap < 1000 && field_count == keys_len && field_count < 1000
-        } else {
-            false
-        };
-
-        // If it looks like both array and object, prefer array if keys validation fails
-        // If it has valid keys that match field_count, it's definitely an object
-        if has_valid_keys {
-            // This looks like an object (has valid keys)
-            let num_fields = (*obj).field_count;
-            let mut result = String::from("{");
-
-            // Get the keys array for field names
-            let keys_arr = (*obj).keys_array;
-            let keys_len = (*keys_arr).length;
-            let keys_elements = (keys_arr as *const u8)
-                .add(std::mem::size_of::<perry_runtime::ArrayHeader>()) as *const f64;
-
-            for f in 0..num_fields {
-                if f > 0 {
-                    result.push(',');
-                }
-
-                // Get field name from keys array
-                if (f as u32) < keys_len {
-                    let key_f64 = *keys_elements.add(f as usize);
-                    let key_bits = key_f64.to_bits();
-                    // Keys are NaN-boxed strings (STRING_TAG = 0x7FFF)
-                    let key_tag = key_bits & 0xFFFF_0000_0000_0000;
-                    let key_ptr = if key_tag == STRING_TAG || key_tag == POINTER_TAG {
-                        (key_bits & POINTER_MASK) as *const StringHeader
-                    } else {
-                        key_bits as *const StringHeader
-                    };
-                    if let Some(key_str) = string_from_header(key_ptr) {
-                        result.push('"');
-                        result.push_str(&key_str);
-                        result.push_str("\":");
-                    } else {
-                        result.push_str(&format!("\"field{}\":", f));
-                    }
-                } else {
-                    result.push_str(&format!("\"field{}\":", f));
-                }
-
-                // Get field value
-                let fields_ptr = (ptr as *const u8)
-                    .add(std::mem::size_of::<perry_runtime::ObjectHeader>()) as *const f64;
-                let field_val = *fields_ptr.add(f as usize);
-                let field_bits = field_val.to_bits();
-
-                // Stringify the field value
-                let field_tag = field_bits & 0xFFFF_0000_0000_0000;
-                if field_bits == TAG_NULL {
-                    result.push_str("null");
-                } else if field_bits == TAG_TRUE {
-                    result.push_str("true");
-                } else if field_bits == TAG_FALSE {
-                    result.push_str("false");
-                } else if field_tag == STRING_TAG {
-                    // String field - use STRING_TAG
-                    let str_ptr = (field_bits & POINTER_MASK) as *const StringHeader;
-                    if let Some(s) = string_from_header(str_ptr) {
-                        let escaped = serde_json::to_string(&s).unwrap_or_else(|_| "null".to_string());
-                        result.push_str(&escaped);
-                    } else {
-                        result.push_str("null");
-                    }
-                } else if field_tag == POINTER_TAG || is_raw_pointer(field_bits) {
-                    // Object or array field - recursively stringify
-                    let field_str = js_json_stringify(field_val);
-                    if !field_str.is_null() {
-                        if let Some(s) = string_from_header(field_str) {
-                            result.push_str(&s);
-                        } else {
-                            result.push_str("null");
-                        }
-                    } else {
-                        result.push_str("null");
-                    }
-                } else {
-                    // Number
-                    if field_val.is_nan() {
-                        result.push_str("null");
-                    } else if field_val.fract() == 0.0 && field_val.abs() < (i64::MAX as f64) {
-                        result.push_str(&format!("{}", field_val as i64));
-                    } else {
-                        result.push_str(&format!("{}", field_val));
-                    }
-                }
-            }
-            result.push('}');
-            return js_string_from_bytes(result.as_ptr(), result.len() as u32);
-        }
-
-        // Try to interpret as array and stringify
-        let arr = ptr as *const perry_runtime::ArrayHeader;
-        if !arr.is_null() {
-            let len = (*arr).length;
-            let elements = (ptr as *const u8).add(std::mem::size_of::<perry_runtime::ArrayHeader>()) as *const f64;
-
-            let mut result = String::from("[");
-            for i in 0..len {
-                if i > 0 {
-                    result.push(',');
-                }
-                let elem = *elements.add(i as usize);
-                let elem_bits = elem.to_bits();
-
-                // Recursively stringify each element
-                // Check for NaN-boxed pointer (object or string) OR raw bitcast pointer
-                let elem_tag = elem_bits & 0xFFFF_0000_0000_0000;
-                let is_nanboxed_ptr = elem_tag == POINTER_TAG || elem_tag == STRING_TAG;
-                let is_raw_ptr = is_raw_pointer(elem_bits);
-
-                if is_nanboxed_ptr || is_raw_ptr {
-                    // It's a pointer - could be a string, object, or nested array
-                    let elem_ptr = if is_nanboxed_ptr {
-                        (elem_bits & POINTER_MASK) as *const u8
-                    } else {
-                        raw_pointer_value(elem_bits)
-                    };
-
-                    // Check if it's a string first (STRING_TAG = 0x7FFF)
-                    if elem_tag == STRING_TAG {
-                        let str_ptr = elem_ptr as *const StringHeader;
-                        if let Some(s) = string_from_header(str_ptr) {
-                            let escaped = serde_json::to_string(&s).unwrap_or_else(|_| "null".to_string());
-                            result.push_str(&escaped);
-                        } else {
-                            result.push_str("null");
-                        }
-                    } else {
-                        // Check if this looks like an object with valid keys, or an array
-                        // Use the same heap pointer vs f64 heuristic as above
-                        let potential_obj = elem_ptr as *const perry_runtime::ObjectHeader;
-                        let potential_keys_ptr = (*potential_obj).keys_array as u64;
-                        let top_16_bits = potential_keys_ptr >> 48;
-                        let is_likely_heap_pointer = top_16_bits == 0 || top_16_bits == 1;
-                        let looks_like_obj_ptr = is_likely_heap_pointer
-                            && potential_keys_ptr > 0x10000
-                            && (potential_keys_ptr & 0x7) == 0;
-
-                        if looks_like_obj_ptr {
-                            // Try as object
-                            let keys_arr = (*potential_obj).keys_array;
-                            let keys_len = (*keys_arr).length;
-                            let field_count = (*potential_obj).field_count;
-
-                            if keys_len > 0 && field_count == keys_len && field_count < 1000 {
-                                // This is an object - stringify recursively
-                                let elem_str = js_json_stringify(elem);
-                                if !elem_str.is_null() {
-                                    if let Some(s) = string_from_header(elem_str) {
-                                        result.push_str(&s);
-                                    } else {
-                                        result.push_str("null");
-                                    }
-                                } else {
-                                    result.push_str("null");
-                                }
-                            } else {
-                                // Try as string
-                                let str_ptr = elem_ptr as *const StringHeader;
-                                if let Some(s) = string_from_header(str_ptr) {
-                                    let escaped = serde_json::to_string(&s).unwrap_or_else(|_| "null".to_string());
-                                    result.push_str(&escaped);
-                                } else {
-                                    result.push_str("null");
-                                }
-                            }
-                        } else {
-                            // Might be an array - check array header
-                            let arr_elem = elem_ptr as *const perry_runtime::ArrayHeader;
-                            let arr_len = (*arr_elem).length;
-                            let arr_cap = (*arr_elem).capacity;
-                            if arr_len <= arr_cap && arr_cap > 0 && arr_cap < 10000 {
-                                // Recursively stringify the nested array
-                                let elem_str = js_json_stringify(elem);
-                                if !elem_str.is_null() {
-                                    if let Some(s) = string_from_header(elem_str) {
-                                        result.push_str(&s);
-                                    } else {
-                                        result.push_str("null");
-                                    }
-                                } else {
-                                    result.push_str("null");
-                                }
-                            } else {
-                                // Try as string
-                                let str_ptr = elem_ptr as *const StringHeader;
-                                if let Some(s) = string_from_header(str_ptr) {
-                                    let escaped = serde_json::to_string(&s).unwrap_or_else(|_| "null".to_string());
-                                    result.push_str(&escaped);
-                                } else {
-                                    result.push_str("null");
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // It's a number
-                    if elem.is_nan() {
-                        result.push_str("null");
-                    } else if elem.fract() == 0.0 && elem.abs() < (i64::MAX as f64) {
-                        result.push_str(&format!("{}", elem as i64));
-                    } else {
-                        result.push_str(&format!("{}", elem));
-                    }
-                }
-            }
-            result.push(']');
-
-            return js_string_from_bytes(result.as_ptr(), result.len() as u32);
-        }
-
-        // Try as string
-        let str_ptr = ptr as *const StringHeader;
+    // Check for string (STRING_TAG)
+    let tag = bits & 0xFFFF_0000_0000_0000;
+    if tag == STRING_TAG {
+        let str_ptr = (bits & POINTER_MASK) as *const StringHeader;
         if let Some(s) = string_from_header(str_ptr) {
-            let escaped = serde_json::to_string(&s).unwrap_or_else(|_| "null".to_string());
-            return js_string_from_bytes(escaped.as_ptr(), escaped.len() as u32);
+            write_escaped_string(buf, &s);
+        } else {
+            buf.push_str("null");
         }
+        return;
+    }
+
+    // Check if it's a pointer (array, object)
+    if let Some(ptr) = extract_pointer(bits) {
+        // Use type_hint to skip heuristic when possible
+        if type_hint == TYPE_OBJECT {
+            stringify_object(ptr, buf);
+            return;
+        }
+        if type_hint == TYPE_ARRAY {
+            stringify_array(ptr, buf);
+            return;
+        }
+
+        // Fallback: heuristic detection
+        if is_object_pointer(ptr) {
+            stringify_object(ptr, buf);
+        } else {
+            // Try as array
+            let arr = ptr as *const perry_runtime::ArrayHeader;
+            if !arr.is_null() {
+                let len = (*arr).length;
+                let cap = (*arr).capacity;
+                if len <= cap && cap > 0 && cap < 10000 {
+                    stringify_array(ptr, buf);
+                    return;
+                }
+            }
+            // Try as string
+            let str_ptr = ptr as *const StringHeader;
+            if let Some(s) = string_from_header(str_ptr) {
+                write_escaped_string(buf, &s);
+            } else {
+                buf.push_str("null");
+            }
+        }
+        return;
     }
 
     // It's a regular number
-    js_json_stringify_number(value)
+    write_number(buf, value);
+}
+
+/// Stringify an object pointer into buffer
+unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
+    let obj = ptr as *const perry_runtime::ObjectHeader;
+    let num_fields = (*obj).field_count;
+    buf.push('{');
+
+    let keys_arr = (*obj).keys_array;
+    let keys_len = (*keys_arr).length;
+    let keys_elements = (keys_arr as *const u8)
+        .add(std::mem::size_of::<perry_runtime::ArrayHeader>()) as *const f64;
+    let fields_ptr = (ptr as *const u8)
+        .add(std::mem::size_of::<perry_runtime::ObjectHeader>()) as *const f64;
+
+    for f in 0..num_fields {
+        if f > 0 {
+            buf.push(',');
+        }
+
+        // Get field name from keys array
+        if (f as u32) < keys_len {
+            let key_f64 = *keys_elements.add(f as usize);
+            let key_bits = key_f64.to_bits();
+            let key_tag = key_bits & 0xFFFF_0000_0000_0000;
+            let key_ptr = if key_tag == STRING_TAG || key_tag == POINTER_TAG {
+                (key_bits & POINTER_MASK) as *const StringHeader
+            } else {
+                key_bits as *const StringHeader
+            };
+            if let Some(key_str) = string_from_header(key_ptr) {
+                buf.push('"');
+                buf.push_str(&key_str);
+                buf.push_str("\":");
+            } else {
+                let _ = write!(buf, "\"field{}\":", f);
+            }
+        } else {
+            let _ = write!(buf, "\"field{}\":", f);
+        }
+
+        // Get field value and stringify inline (no FFI call)
+        let field_val = *fields_ptr.add(f as usize);
+        stringify_value(field_val, TYPE_UNKNOWN, buf);
+    }
+    buf.push('}');
+}
+
+/// Stringify an array pointer into buffer
+unsafe fn stringify_array(ptr: *const u8, buf: &mut String) {
+    let arr = ptr as *const perry_runtime::ArrayHeader;
+    let len = (*arr).length;
+    let elements = (ptr as *const u8).add(std::mem::size_of::<perry_runtime::ArrayHeader>()) as *const f64;
+
+    buf.push('[');
+    for i in 0..len {
+        if i > 0 {
+            buf.push(',');
+        }
+        let elem = *elements.add(i as usize);
+        let elem_bits = elem.to_bits();
+        let elem_tag = elem_bits & 0xFFFF_0000_0000_0000;
+
+        // Inline type dispatch instead of calling stringify_value for common cases
+        if elem_tag == STRING_TAG {
+            let str_ptr = (elem_bits & POINTER_MASK) as *const StringHeader;
+            if let Some(s) = string_from_header(str_ptr) {
+                write_escaped_string(buf, &s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if elem_bits == TAG_NULL {
+            buf.push_str("null");
+        } else if elem_bits == TAG_TRUE {
+            buf.push_str("true");
+        } else if elem_bits == TAG_FALSE {
+            buf.push_str("false");
+        } else if elem_tag == POINTER_TAG || is_raw_pointer(elem_bits) {
+            // Nested object or array
+            let elem_ptr = if elem_tag == POINTER_TAG {
+                (elem_bits & POINTER_MASK) as *const u8
+            } else {
+                elem_bits as *const u8
+            };
+            if is_object_pointer(elem_ptr) {
+                stringify_object(elem_ptr, buf);
+            } else {
+                // Try as array
+                let arr_elem = elem_ptr as *const perry_runtime::ArrayHeader;
+                let arr_len = (*arr_elem).length;
+                let arr_cap = (*arr_elem).capacity;
+                if arr_len <= arr_cap && arr_cap > 0 && arr_cap < 10000 {
+                    stringify_array(elem_ptr, buf);
+                } else {
+                    // Try as string
+                    let str_ptr = elem_ptr as *const StringHeader;
+                    if let Some(s) = string_from_header(str_ptr) {
+                        write_escaped_string(buf, &s);
+                    } else {
+                        buf.push_str("null");
+                    }
+                }
+            }
+        } else {
+            // Number
+            write_number(buf, elem);
+        }
+    }
+    buf.push(']');
+}
+
+/// Generic JSON.stringify that handles any JSValue
+/// Takes a f64 (NaN-boxed JSValue) and a type_hint (0=unknown, 1=object, 2=array)
+/// Returns a string pointer
+#[no_mangle]
+pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut StringHeader {
+    let mut buf = String::with_capacity(256);
+    stringify_value(value, type_hint, &mut buf);
+    js_string_from_bytes(buf.as_ptr(), buf.len() as u32)
 }
 
 /// Check if a string is valid JSON
