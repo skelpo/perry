@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.96
+**Current Version:** 0.2.97
 
 ## Workflow Requirements
 
@@ -238,6 +238,19 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.97
+- Add `AsyncLocalStorage` from `async_hooks` / `node:async_hooks`
+  - `new AsyncLocalStorage()` creates a new instance
+  - `als.run(store, callback)` runs callback with store context, returns callback result
+  - `als.getStore()` returns current store or undefined
+  - `als.enterWith(store)` pushes store onto context stack
+  - `als.exit(callback)` temporarily clears context, runs callback, restores context
+  - `als.disable()` clears the store stack
+  - Handle-based implementation using `perry-stdlib` common handle registry
+  - Added `"async_hooks"` to NATIVE_MODULES list
+  - Fixed `is_native_module()` to strip `node:` prefix (e.g., `"node:async_hooks"` → `"async_hooks"`)
+  - Normalized import source paths in HIR lowering to strip `node:` prefix
 
 ### v0.2.96
 - Fix Cranelift "declared type of variable doesn't match type of value" panics caused by I32 values

@@ -24,6 +24,7 @@ pub mod lru_cache;
 pub mod commander;
 pub mod decimal;
 pub mod exponential_backoff;
+pub mod async_local_storage;
 
 // Re-export core
 pub use common::*;
@@ -37,6 +38,7 @@ pub use lru_cache::*;
 pub use commander::*;
 pub use decimal::*;
 pub use exponential_backoff::*;
+pub use async_local_storage::*;
 
 // === HTTP Server ===
 #[cfg(feature = "http-server")]

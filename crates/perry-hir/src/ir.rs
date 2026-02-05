@@ -47,11 +47,14 @@ pub const NATIVE_MODULES: &[&str] = &[
     "exponential-backoff",
     // HTTP framework
     "fastify",
+    // Node.js built-in modules
+    "async_hooks",
 ];
 
 /// Check if a module path refers to a native stdlib module
 pub fn is_native_module(path: &str) -> bool {
-    NATIVE_MODULES.contains(&path)
+    let normalized = path.strip_prefix("node:").unwrap_or(path);
+    NATIVE_MODULES.contains(&normalized)
 }
 
 /// The kind of module being imported, determining how it's executed

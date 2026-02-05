@@ -5870,6 +5870,65 @@ impl Compiler {
         }
 
         // ========================================================================
+        // AsyncLocalStorage (async_hooks)
+        // ========================================================================
+
+        // js_async_local_storage_new() -> i64 (handle)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64)); // handle
+            let func_id = self.module.declare_function("js_async_local_storage_new", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_async_local_storage_new".to_string(), func_id);
+        }
+
+        // js_async_local_storage_run(handle: i64, store: f64, callback: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::F64)); // store (any NaN-boxed value)
+            sig.params.push(AbiParam::new(types::I64)); // callback closure ptr
+            sig.returns.push(AbiParam::new(types::F64)); // result
+            let func_id = self.module.declare_function("js_async_local_storage_run", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_async_local_storage_run".to_string(), func_id);
+        }
+
+        // js_async_local_storage_get_store(handle: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.returns.push(AbiParam::new(types::F64)); // store or undefined
+            let func_id = self.module.declare_function("js_async_local_storage_get_store", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_async_local_storage_get_store".to_string(), func_id);
+        }
+
+        // js_async_local_storage_enter_with(handle: i64, store: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::F64)); // store
+            let func_id = self.module.declare_function("js_async_local_storage_enter_with", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_async_local_storage_enter_with".to_string(), func_id);
+        }
+
+        // js_async_local_storage_exit(handle: i64, callback: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::I64)); // callback closure ptr
+            sig.returns.push(AbiParam::new(types::F64)); // result
+            let func_id = self.module.declare_function("js_async_local_storage_exit", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_async_local_storage_exit".to_string(), func_id);
+        }
+
+        // js_async_local_storage_disable(handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            let func_id = self.module.declare_function("js_async_local_storage_disable", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_async_local_storage_disable".to_string(), func_id);
+        }
+
+        // ========================================================================
         // LRUCache
         // ========================================================================
 
@@ -22359,6 +22418,17 @@ fn compile_expr(
                 return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), handle));
             }
 
+            if class_name == "AsyncLocalStorage" {
+                // new AsyncLocalStorage() - call js_async_local_storage_new()
+                let new_func = extern_funcs.get("js_async_local_storage_new")
+                    .ok_or_else(|| anyhow!("js_async_local_storage_new not declared"))?;
+                let func_ref = module.declare_func_in_func(*new_func, builder.func);
+                let call = builder.ins().call(func_ref, &[]);
+                let handle = builder.inst_results(call)[0];
+                // Return handle as f64 (NaN-boxed pointer)
+                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), handle));
+            }
+
             // new Promise(executor) - call js_promise_new_with_executor(executor)
             // The executor is a closure (resolve, reject) => void
             if class_name == "Promise" {
@@ -25150,6 +25220,13 @@ fn compile_expr(
                 ("events", true, "removeAllListeners") => "js_event_emitter_remove_all_listeners",
                 ("events", true, "listenerCount") => "js_event_emitter_listener_count",
 
+                // async_hooks module (AsyncLocalStorage)
+                ("async_hooks", true, "run") => "js_async_local_storage_run",
+                ("async_hooks", true, "getStore") => "js_async_local_storage_get_store",
+                ("async_hooks", true, "enterWith") => "js_async_local_storage_enter_with",
+                ("async_hooks", true, "exit") => "js_async_local_storage_exit",
+                ("async_hooks", true, "disable") => "js_async_local_storage_disable",
+
                 // lru-cache module (LRUCache)
                 ("lru-cache", true, "get") => "js_lru_cache_get",
                 ("lru-cache", true, "set") => "js_lru_cache_set",
@@ -25754,7 +25831,8 @@ fn compile_expr(
                           native_module == "nodemailer" || native_module == "dayjs" ||
                           native_module == "moment" || native_module == "node-cron" ||
                           native_module == "rate-limiter-flexible" ||
-                          native_module == "fastify" {
+                          native_module == "fastify" ||
+                          native_module == "async_hooks" {
                     // These modules return NaN-boxed pointers, extract the raw pointer
                     let obj_f64 = ensure_f64(builder, obj_val);
                     let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
@@ -25935,6 +26013,35 @@ fn compile_expr(
                                 let event_ptr = builder.inst_results(event_call)[0];
                                 call_args.push(event_ptr);
                             }
+                        }
+                        _ => {}
+                    }
+                } else if native_module == "async_hooks" {
+                    // AsyncLocalStorage methods
+                    match method.as_str() {
+                        "run" => {
+                            // run(store, callback) - store is any value (f64), callback is closure (i64)
+                            if arg_vals.len() >= 2 {
+                                call_args.push(ensure_f64(builder, arg_vals[0]));
+                                let cb = ensure_i64(builder, arg_vals[1]);
+                                call_args.push(cb);
+                            }
+                        }
+                        "enterWith" => {
+                            // enterWith(store) - store is any value (f64)
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_f64(builder, arg_vals[0]));
+                            }
+                        }
+                        "exit" => {
+                            // exit(callback) - callback is closure (i64)
+                            if !arg_vals.is_empty() {
+                                let cb = ensure_i64(builder, arg_vals[0]);
+                                call_args.push(cb);
+                            }
+                        }
+                        "getStore" | "disable" => {
+                            // No additional args - just the handle
                         }
                         _ => {}
                     }
@@ -26579,6 +26686,10 @@ fn compile_expr(
                     let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
                     let call = builder.ins().call(nanbox_ref, &[result]);
                     Ok(builder.inst_results(call)[0])
+                } else if native_module == "async_hooks" {
+                    // AsyncLocalStorage: run/getStore/exit return f64 directly,
+                    // enterWith/disable are void (result is meaningless, return 0.0)
+                    Ok(result)
                 } else if native_module == "events" && (method == "emit" || method == "listenerCount") {
                     // emit and listenerCount return f64 directly (boolean/number)
                     Ok(result)

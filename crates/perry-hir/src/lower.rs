@@ -748,7 +748,9 @@ fn lower_module_decl(
     match decl {
         ast::ModuleDecl::Import(import_decl) => {
             // Get the source module path
-            let source = import_decl.src.value.as_str().unwrap_or("").to_string();
+            let raw_source = import_decl.src.value.as_str().unwrap_or("").to_string();
+            // Normalize "node:" prefix (e.g., "node:async_hooks" -> "async_hooks")
+            let source = raw_source.strip_prefix("node:").unwrap_or(&raw_source).to_string();
 
             // Check if this is a native module import
             let is_native = is_native_module(&source);
@@ -853,6 +855,7 @@ fn lower_module_decl(
                                     // Map class names to their modules
                                     let module_name = match class_name {
                                         "EventEmitter" => Some("events"),
+                                        "AsyncLocalStorage" => Some("async_hooks"),
                                         "WebSocket" => Some("ws"),
                                         "Redis" => Some("ioredis"),
                                         "LRUCache" => Some("lru-cache"),
@@ -879,6 +882,7 @@ fn lower_module_decl(
                                         // Map class names to their modules
                                         let module_name = match class_name {
                                             "EventEmitter" => Some("events"),
+                                            "AsyncLocalStorage" => Some("async_hooks"),
                                             "WebSocket" => Some("ws"),
                                             "Redis" => Some("ioredis"),
                                             "LRUCache" => Some("lru-cache"),
@@ -1711,6 +1715,7 @@ fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::ClassDecl, is_e
             // First check if it's a native module class
             let native_parent = match parent_name.as_str() {
                 "EventEmitter" => Some(("events".to_string(), "EventEmitter".to_string())),
+                "AsyncLocalStorage" => Some(("async_hooks".to_string(), "AsyncLocalStorage".to_string())),
                 _ => None,
             };
             if native_parent.is_some() {
@@ -6495,6 +6500,7 @@ fn lower_var_decl_with_destructuring(
                         // Map class names to their modules
                         let module_name = match class_name {
                             "EventEmitter" => Some("events"),
+                            "AsyncLocalStorage" => Some("async_hooks"),
                             "WebSocket" => Some("ws"),
                             "Redis" => Some("ioredis"),
                             "LRUCache" => Some("lru-cache"),
@@ -6523,6 +6529,7 @@ fn lower_var_decl_with_destructuring(
                             // Map class names to their modules
                             let module_name = match class_name {
                                 "EventEmitter" => Some("events"),
+                                "AsyncLocalStorage" => Some("async_hooks"),
                                 "WebSocket" => Some("ws"),
                                 "Redis" => Some("ioredis"),
                                 "LRUCache" => Some("lru-cache"),
