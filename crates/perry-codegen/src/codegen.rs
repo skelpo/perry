@@ -11740,13 +11740,21 @@ fn compile_stmt(
                                 builder.ins().bitcast(types::I64, MemFlags::new(), val)
                             }
                         } else {
-                            val
+                            // Value is not F64 - need to convert to I64
+                            let val_type = builder.func.dfg.value_type(val);
+                            if val_type == types::I32 {
+                                builder.ins().sextend(types::I64, val)
+                            } else {
+                                val
+                            }
                         }
                     } else if is_union {
                         // Union types use NaN-boxed f64 values - keep as f64
                         let val_type = builder.func.dfg.value_type(val);
                         if val_type == types::I64 {
                             builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                        } else if val_type == types::I32 {
+                            builder.ins().fcvt_from_sint(types::F64, val)
                         } else {
                             val
                         }
@@ -11756,6 +11764,10 @@ fn compile_stmt(
                         let val_type = builder.func.dfg.value_type(val);
                         if val_type == types::I64 && var_type == types::F64 {
                             builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                        } else if val_type == types::I32 && var_type == types::F64 {
+                            builder.ins().fcvt_from_sint(types::F64, val)
+                        } else if val_type == types::I32 && var_type == types::I64 {
+                            builder.ins().sextend(types::I64, val)
                         } else {
                             val
                         }
@@ -17272,11 +17284,17 @@ fn compile_expr(
                 let val_type = builder.func.dfg.value_type(val);
 
                 let converted_val = if var_type != val_type {
-                    // Types don't match - convert using bitcast
+                    // Types don't match - convert
                     if var_type == types::F64 && val_type == types::I64 {
                         builder.ins().bitcast(types::F64, MemFlags::new(), val)
                     } else if var_type == types::I64 && val_type == types::F64 {
                         builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                    } else if val_type == types::I32 && var_type == types::F64 {
+                        builder.ins().fcvt_from_sint(types::F64, val)
+                    } else if val_type == types::I32 && var_type == types::I64 {
+                        builder.ins().sextend(types::I64, val)
+                    } else if var_type == types::I32 && val_type == types::F64 {
+                        builder.ins().fcvt_to_sint(types::I32, val)
                     } else {
                         val
                     }
@@ -18203,9 +18221,12 @@ fn compile_expr(
                     let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
                     // Convert rhs to match merge_type if needed
                     // For i64->f64 conversion, we need to NaN-box the pointer to preserve type info
-                    let rhs_converted = if merge_type == types::I64 && builder.func.dfg.value_type(rhs) == types::F64 {
+                    let rhs_type = builder.func.dfg.value_type(rhs);
+                    let rhs_converted = if merge_type == types::I64 && rhs_type == types::F64 {
                         builder.ins().bitcast(types::I64, MemFlags::new(), rhs)
-                    } else if merge_type == types::F64 && builder.func.dfg.value_type(rhs) == types::I64 {
+                    } else if merge_type == types::I64 && rhs_type == types::I32 {
+                        builder.ins().sextend(types::I64, rhs)
+                    } else if merge_type == types::F64 && rhs_type == types::I64 {
                         // NaN-box the pointer (could be string, object, array, etc.)
                         // Use js_nanbox_string for strings (most common case from literals)
                         let nanbox_func = extern_funcs.get("js_nanbox_string")
@@ -18213,6 +18234,8 @@ fn compile_expr(
                         let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
                         let call = builder.ins().call(nanbox_ref, &[rhs]);
                         builder.inst_results(call)[0]
+                    } else if merge_type == types::F64 && rhs_type != types::F64 {
+                        ensure_f64(builder, rhs)
                     } else {
                         rhs
                     };
@@ -18255,9 +18278,12 @@ fn compile_expr(
                     let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
                     // Convert rhs to match lhs_type if needed
                     // For i64->f64 conversion, we need to NaN-box the pointer to preserve type info
-                    let rhs_converted = if lhs_type == types::I64 && builder.func.dfg.value_type(rhs) == types::F64 {
+                    let rhs_type = builder.func.dfg.value_type(rhs);
+                    let rhs_converted = if lhs_type == types::I64 && rhs_type == types::F64 {
                         builder.ins().bitcast(types::I64, MemFlags::new(), rhs)
-                    } else if lhs_type == types::F64 && builder.func.dfg.value_type(rhs) == types::I64 {
+                    } else if lhs_type == types::I64 && rhs_type == types::I32 {
+                        builder.ins().sextend(types::I64, rhs)
+                    } else if lhs_type == types::F64 && rhs_type == types::I64 {
                         // NaN-box the pointer (could be string, object, array, etc.)
                         // Use js_nanbox_string for strings (most common case from literals)
                         let nanbox_func = extern_funcs.get("js_nanbox_string")
@@ -18265,6 +18291,8 @@ fn compile_expr(
                         let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
                         let call = builder.ins().call(nanbox_ref, &[rhs]);
                         builder.inst_results(call)[0]
+                    } else if lhs_type == types::F64 && rhs_type != types::F64 {
+                        ensure_f64(builder, rhs)
                     } else {
                         rhs
                     };
@@ -18299,10 +18327,15 @@ fn compile_expr(
                     builder.seal_block(rhs_block);
                     let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
                     // Convert rhs to lhs_type if needed
-                    let rhs_converted = if lhs_type == types::I64 && builder.func.dfg.value_type(rhs) == types::F64 {
+                    let rhs_type = builder.func.dfg.value_type(rhs);
+                    let rhs_converted = if lhs_type == types::I64 && rhs_type == types::F64 {
                         builder.ins().bitcast(types::I64, MemFlags::new(), rhs)
-                    } else if lhs_type == types::F64 && builder.func.dfg.value_type(rhs) == types::I64 {
+                    } else if lhs_type == types::I64 && rhs_type == types::I32 {
+                        builder.ins().sextend(types::I64, rhs)
+                    } else if lhs_type == types::F64 && rhs_type == types::I64 {
                         builder.ins().bitcast(types::F64, MemFlags::new(), rhs)
+                    } else if lhs_type == types::F64 && rhs_type == types::I32 {
+                        builder.ins().fcvt_from_sint(types::F64, rhs)
                     } else {
                         rhs
                     };

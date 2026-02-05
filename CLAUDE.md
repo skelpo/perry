@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.95
+**Current Version:** 0.2.96
 
 ## Workflow Requirements
 
@@ -238,6 +238,18 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.96
+- Fix Cranelift "declared type of variable doesn't match type of value" panics caused by I32 values
+  - Root cause: Multiple code paths in codegen.rs only handled F64<->I64 conversions but not I32
+  - When loop counter optimizations or runtime function returns produced I32 values, they were passed to `def_var()` without conversion
+  - Fixed 6 locations:
+    1. `Stmt::Let` init fallthrough: Added I32->F64 (`fcvt_from_sint`) and I32->I64 (`sextend`) conversions
+    2. `Stmt::Let` `is_pointer && !is_union` path: Added I32->I64 conversion via `sextend`
+    3. `Stmt::Let` `is_union` path: Added I32->F64 conversion via `fcvt_from_sint`
+    4. `Expr::LocalSet` fallthrough: Added I32->F64, I32->I64, and F64->I32 conversions
+    5. `Logical::And` / `Logical::Or` rhs merge: Added I32 handling using `ensure_f64` and `sextend`
+    6. `Logical::Coalesce` rhs merge: Added I32->F64 and I32->I64 conversions
 
 ### v0.2.95
 - Fix closure capture missing variable references in Delete, Error, Uint8Array, EnvGetDynamic, and JS runtime expressions
