@@ -199,12 +199,8 @@ pub unsafe extern "C" fn js_handle_property_dispatch(
     if with_handle::<crate::fastify::FastifyContext, bool, _>(handle, |_| true).unwrap_or(false) {
         return match property_name {
             "query" => {
-                let ptr = crate::fastify::js_fastify_req_query(handle);
-                if ptr.is_null() {
-                    f64::from_bits(0x7FFC_0000_0000_0001) // undefined
-                } else {
-                    JSValue::string_ptr(ptr).bits() as f64
-                }
+                // Return a real JavaScript object, not a JSON string
+                crate::fastify::js_fastify_req_query_object(handle)
             }
             "params" => {
                 let ptr = crate::fastify::js_fastify_req_params(handle);

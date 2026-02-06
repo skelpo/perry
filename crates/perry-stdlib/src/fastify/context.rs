@@ -216,7 +216,7 @@ pub unsafe extern "C" fn js_fastify_req_param(ctx_handle: Handle, name: i64) -> 
     std::ptr::null_mut()
 }
 
-/// Get all query params as JSON object
+/// Get all query params as JSON string (for backwards compatibility)
 #[no_mangle]
 pub unsafe extern "C" fn js_fastify_req_query(ctx_handle: Handle) -> *mut StringHeader {
     if let Some(ctx) = get_handle::<FastifyContext>(ctx_handle) {
@@ -226,6 +226,54 @@ pub unsafe extern "C" fn js_fastify_req_query(ctx_handle: Handle) -> *mut String
         }
     }
     std::ptr::null_mut()
+}
+
+/// Get all query params as a JavaScript object (NaN-boxed pointer)
+#[no_mangle]
+pub unsafe extern "C" fn js_fastify_req_query_object(ctx_handle: Handle) -> f64 {
+    use perry_runtime::{js_object_alloc, js_object_set_keys, js_object_set_field_f64, js_array_alloc, js_array_push_f64, js_nanbox_string};
+
+    if let Some(ctx) = get_handle::<FastifyContext>(ctx_handle) {
+        let params = ctx.get_query_params();
+        let field_count = params.len() as u32;
+
+        // Allocate object with enough fields
+        let obj = js_object_alloc(0, field_count);
+        if obj.is_null() {
+            return f64::from_bits(0x7FFC_0000_0000_0001); // undefined
+        }
+
+        // Allocate keys array
+        let keys_arr = js_array_alloc(field_count);
+        if keys_arr.is_null() {
+            return f64::from_bits(0x7FFC_0000_0000_0001);
+        }
+
+        // Set each field and add key to keys array
+        for (i, (key, value)) in params.iter().enumerate() {
+            // Create key string
+            let key_ptr = js_string_from_bytes(key.as_ptr(), key.len() as u32);
+            // Create value string
+            let value_ptr = js_string_from_bytes(value.as_ptr(), value.len() as u32);
+
+            // Add key to keys array (NaN-boxed)
+            let key_nanboxed = js_nanbox_string(key_ptr as i64);
+            js_array_push_f64(keys_arr, key_nanboxed);
+
+            // Set field on object by index (NaN-boxed string value)
+            let value_nanboxed = js_nanbox_string(value_ptr as i64);
+            js_object_set_field_f64(obj, i as u32, value_nanboxed);
+        }
+
+        // Set keys array on object
+        js_object_set_keys(obj, keys_arr);
+
+        // Return NaN-boxed pointer
+        let ptr = obj as u64;
+        return f64::from_bits(0x7FFD_0000_0000_0000 | (ptr & 0x0000_FFFF_FFFF_FFFF));
+    }
+
+    f64::from_bits(0x7FFC_0000_0000_0001) // undefined
 }
 
 /// Get raw request body as string

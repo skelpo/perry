@@ -166,7 +166,11 @@ async fn handle_request(
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let method = req.method().to_string();
     let uri = req.uri();
-    let path = uri.path().to_string();
+    // Include query string in the path so FastifyContext can parse it
+    let path = match uri.query() {
+        Some(q) => format!("{}?{}", uri.path(), q),
+        None => uri.path().to_string(),
+    };
 
     // Extract headers
     let mut headers = HashMap::new();
@@ -321,12 +325,18 @@ fn event_loop(app_handle: Handle, request_rx: &mut mpsc::Receiver<FastifyPending
                 perry_runtime::js_promise_run_microtasks();
 
                 // Check if handler returned a promise (NaN-boxed pointer to a Promise)
+                let mut final_result = result;
                 let jsv = JSValue::from_bits(result.to_bits());
+                eprintln!("[DEBUG] result bits=0x{:016X} is_pointer={}", result.to_bits(), jsv.is_pointer());
                 if jsv.is_pointer() {
                     let ptr = jsv.as_pointer::<perry_runtime::Promise>();
+                    eprintln!("[DEBUG] ptr={:p} is_promise={}", ptr, unsafe { perry_runtime::js_is_promise(ptr as *mut perry_runtime::Promise) });
                     // Try to treat it as a promise and wait for it
                     if unsafe { perry_runtime::js_is_promise(ptr as *mut perry_runtime::Promise) } != 0 {
                         wait_for_promise(ptr as *mut perry_runtime::Promise);
+                        // Extract the resolved value from the promise
+                        final_result = unsafe { perry_runtime::js_promise_value(ptr as *mut perry_runtime::Promise) };
+                        eprintln!("[DEBUG] promise value bits=0x{:016X}", final_result.to_bits());
                     }
                 }
 
@@ -337,7 +347,7 @@ fn event_loop(app_handle: Handle, request_rx: &mut mpsc::Receiver<FastifyPending
                         headers: ctx.response_headers.clone(),
                         body: ctx.response_body.clone().unwrap_or_else(|| {
                             // If no explicit body, use handler return value
-                            build_response_body(result)
+                            build_response_body(final_result)
                         }),
                     };
 

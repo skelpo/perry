@@ -24106,18 +24106,28 @@ fn compile_expr(
                     // For string elements, NaN-box with STRING_TAG
                     // For object elements, NaN-box with POINTER_TAG
                     // For number elements, the f64 bits are used directly
+                    // IMPORTANT: Check if value is already NaN-boxed (F64) to avoid double NaN-boxing
+                    let val_type = builder.func.dfg.value_type(val);
                     let jsvalue_bits = if is_string_element(elem, locals) {
-                        // String pointer needs NaN-boxing with STRING_TAG
-                        let ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val);
-                        let call = builder.ins().call(nanbox_string_ref, &[ptr]);
-                        let boxed_f64 = builder.inst_results(call)[0];
-                        builder.ins().bitcast(types::I64, MemFlags::new(), boxed_f64)
+                        if val_type == types::F64 {
+                            // Already NaN-boxed F64 (e.g., from Expr::String), just bitcast to I64
+                            builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                        } else {
+                            // I64 raw pointer, needs NaN-boxing with STRING_TAG
+                            let call = builder.ins().call(nanbox_string_ref, &[val]);
+                            let boxed_f64 = builder.inst_results(call)[0];
+                            builder.ins().bitcast(types::I64, MemFlags::new(), boxed_f64)
+                        }
                     } else if is_object_element(elem, locals) {
-                        // Object pointer needs NaN-boxing with POINTER_TAG
-                        let ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val);
-                        let call = builder.ins().call(nanbox_pointer_ref, &[ptr]);
-                        let boxed_f64 = builder.inst_results(call)[0];
-                        builder.ins().bitcast(types::I64, MemFlags::new(), boxed_f64)
+                        if val_type == types::F64 {
+                            // Already NaN-boxed F64, just bitcast to I64
+                            builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                        } else {
+                            // I64 raw pointer, needs NaN-boxing with POINTER_TAG
+                            let call = builder.ins().call(nanbox_pointer_ref, &[val]);
+                            let boxed_f64 = builder.inst_results(call)[0];
+                            builder.ins().bitcast(types::I64, MemFlags::new(), boxed_f64)
+                        }
                     } else {
                         // Numbers: f64 bits stored as-is
                         builder.ins().bitcast(types::I64, MemFlags::new(), val)

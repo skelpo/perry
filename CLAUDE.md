@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.103
+**Current Version:** 0.2.104
 
 ## Workflow Requirements
 
@@ -238,6 +238,22 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.104
+- Fix `['a', 'b'].join('-')` returning garbage value when returned directly from closures
+  - Root cause 1 (HIR lowering): Array methods on inline array literals were not being converted to specialized expressions
+    - `['a', 'b'].join('-')` remained as `Call { callee: PropertyGet { object: Array(...), property: "join" } }`
+    - Instead of `ArrayJoin { array: Array(...), separator: String("-") }`
+    - Added handling in lower.rs for array methods (join, map, filter, forEach, find, indexOf, includes, slice, reduce)
+      when the object is an inline array literal (`ast::Expr::Array`)
+  - Root cause 2 (Codegen): Expr::Array element handling was double NaN-boxing string elements
+    - `Expr::String` already returns NaN-boxed F64 (with STRING_TAG)
+    - The array element code was bitcasting F64→I64 then calling `js_nanbox_string` again
+    - This corrupted the value by applying STRING_TAG twice
+    - Fix: Check `builder.func.dfg.value_type(val)` - if already F64, just bitcast to I64; only NaN-box if I64
+  - Test cases now pass:
+    - `return ['a', 'b'].join('-')` correctly returns "a-b"
+    - `const parts = ['a']; return parts.join('-')` also works (was already working via LocalGet path)
 
 ### v0.2.103
 - Fix SIGSEGV when accessing properties on Fastify handle-based objects (request.query, request.params, etc.)

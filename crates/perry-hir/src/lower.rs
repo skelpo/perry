@@ -4265,6 +4265,102 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                         }
                     }
 
+                    // Check for array methods on inline array literals (e.g., ['a', 'b'].join('-'))
+                    if let ast::Callee::Expr(expr) = &call.callee {
+                        if let ast::Expr::Member(member) = expr.as_ref() {
+                            if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                let method_name = method_ident.sym.as_ref();
+                                if let ast::Expr::Array(_arr_lit) = member.obj.as_ref() {
+                                    // Lower the array literal
+                                    let array_expr = lower_expr(ctx, &member.obj)?;
+                                    match method_name {
+                                        "join" => {
+                                            // ['a', 'b'].join(separator?) -> string
+                                            let separator = args.into_iter().next().map(Box::new);
+                                            return Ok(Expr::ArrayJoin {
+                                                array: Box::new(array_expr),
+                                                separator,
+                                            });
+                                        }
+                                        "map" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArrayMap {
+                                                    array: Box::new(array_expr),
+                                                    callback: Box::new(args.into_iter().next().unwrap()),
+                                                });
+                                            }
+                                        }
+                                        "filter" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArrayFilter {
+                                                    array: Box::new(array_expr),
+                                                    callback: Box::new(args.into_iter().next().unwrap()),
+                                                });
+                                            }
+                                        }
+                                        "forEach" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArrayForEach {
+                                                    array: Box::new(array_expr),
+                                                    callback: Box::new(args.into_iter().next().unwrap()),
+                                                });
+                                            }
+                                        }
+                                        "find" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArrayFind {
+                                                    array: Box::new(array_expr),
+                                                    callback: Box::new(args.into_iter().next().unwrap()),
+                                                });
+                                            }
+                                        }
+                                        "indexOf" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArrayIndexOf {
+                                                    array: Box::new(array_expr),
+                                                    value: Box::new(args.into_iter().next().unwrap()),
+                                                });
+                                            }
+                                        }
+                                        "includes" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArrayIncludes {
+                                                    array: Box::new(array_expr),
+                                                    value: Box::new(args.into_iter().next().unwrap()),
+                                                });
+                                            }
+                                        }
+                                        "slice" => {
+                                            if args.len() >= 1 {
+                                                let mut args_iter = args.into_iter();
+                                                let start = args_iter.next().unwrap();
+                                                let end = args_iter.next();
+                                                return Ok(Expr::ArraySlice {
+                                                    array: Box::new(array_expr),
+                                                    start: Box::new(start),
+                                                    end: end.map(Box::new),
+                                                });
+                                            }
+                                        }
+                                        "reduce" => {
+                                            if args.len() >= 1 {
+                                                let mut args_iter = args.into_iter();
+                                                let callback = args_iter.next().unwrap();
+                                                let initial = args_iter.next().map(Box::new);
+                                                return Ok(Expr::ArrayReduce {
+                                                    array: Box::new(array_expr),
+                                                    callback: Box::new(callback),
+                                                    initial,
+                                                });
+                                            }
+                                        }
+                                        _ => {} // Fall through for other methods
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Check for global built-in function calls (parseInt, parseFloat, Number, String, isNaN, isFinite)
                     if let ast::Expr::Ident(ident) = expr.as_ref() {
                         let func_name = ident.sym.as_ref();
