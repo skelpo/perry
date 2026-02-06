@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.109
+**Current Version:** 0.2.110
 
 ## Workflow Requirements
 
@@ -238,6 +238,21 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.110
+- Fix module-level variable LocalIds overwriting function parameter LocalIds
+  - Root cause: When function inlining creates new Let statements in the module's init section, those
+    LocalIds can collide with function parameter LocalIds (HIR uses a global counter for all LocalIds)
+  - In `compile_function_inner`, module-level variables were loaded into the `locals` HashMap keyed by
+    LocalId. If a function parameter had the same LocalId as a module-level variable, the module variable
+    would overwrite the parameter entry
+  - Example: Function `test(msg, code, ctx)` has params with LocalIds 0,1,2. After inlining `test("hello", 1, obj)`,
+    a module-level Let with LocalId 1 for "ctx" would overwrite the "code" parameter entry in locals
+  - This caused `LocalGet(1)` (code param) to resolve to the wrong variable (module-level ctx), producing
+    Cranelift verifier errors: "arg 0 (v4) has type i64, expected f64"
+  - Fix: Before loading module-level variables into the locals map, check if the LocalId is already present
+    (meaning it's a function parameter). Skip loading module variables that would shadow parameters.
+  - Applied fix to 3 locations: standalone functions, class methods, and closure functions
 
 ### v0.2.109
 - Fix string concatenation in unrolled loops producing wrong results

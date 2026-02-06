@@ -1325,6 +1325,11 @@ impl Compiler {
                     })
                 };
 
+                // Skip if this LocalId is already a method parameter
+                if locals.contains_key(local_id) {
+                    continue;
+                }
+
                 let var = Variable::new(next_var);
                 next_var += 1;
                 builder.declare_var(var, var_type);
@@ -9180,13 +9185,19 @@ impl Compiler {
                 next_var_id += 1;
                 builder.declare_var(var, var_type);
 
+                // Insert into locals so LocalGet can find it, but only if not already
+                // present (function parameters take precedence over module-level vars)
+                if locals.contains_key(local_id) {
+                    // This LocalId is already a function parameter - don't load module var
+                    continue;
+                }
+
                 // Load the value from the global data slot
                 let global_val = self.module.declare_data_in_func(*data_id, builder.func);
                 let ptr = builder.ins().global_value(types::I64, global_val);
                 let val = builder.ins().load(var_type, MemFlags::new(), ptr, 0);
                 builder.def_var(var, val);
 
-                // Insert into locals so LocalGet can find it
                 let mut info = local_info_template;
                 info.var = var;
                 locals.insert(*local_id, info);
@@ -10589,6 +10600,11 @@ impl Compiler {
                         squared_cache: None, product_cache: None,
                     })
                 };
+
+                // Skip if this LocalId is already a closure parameter
+                if locals.contains_key(local_id) {
+                    continue;
+                }
 
                 let var = Variable::new(next_var);
                 next_var += 1;
