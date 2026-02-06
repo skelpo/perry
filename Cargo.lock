@@ -3225,7 +3225,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perry"
-version = "0.2.101"
+version = "0.2.108"
 dependencies = [
  "anyhow",
  "atty",
@@ -3249,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen"
-version = "0.2.101"
+version = "0.2.108"
 dependencies = [
  "anyhow",
  "cranelift",
@@ -3267,7 +3267,7 @@ dependencies = [
 
 [[package]]
 name = "perry-diagnostics"
-version = "0.2.101"
+version = "0.2.108"
 dependencies = [
  "serde",
  "serde_json",
@@ -3275,7 +3275,7 @@ dependencies = [
 
 [[package]]
 name = "perry-hir"
-version = "0.2.101"
+version = "0.2.108"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -3287,7 +3287,7 @@ dependencies = [
 
 [[package]]
 name = "perry-jsruntime"
-version = "0.2.101"
+version = "0.2.108"
 dependencies = [
  "anyhow",
  "deno_core",
@@ -3305,7 +3305,7 @@ dependencies = [
 
 [[package]]
 name = "perry-parser"
-version = "0.2.101"
+version = "0.2.108"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -3317,7 +3317,7 @@ dependencies = [
 
 [[package]]
 name = "perry-runtime"
-version = "0.2.101"
+version = "0.2.108"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3336,7 +3336,7 @@ dependencies = [
 
 [[package]]
 name = "perry-stdlib"
-version = "0.2.101"
+version = "0.2.108"
 dependencies = [
  "aes",
  "anyhow",
@@ -3391,7 +3391,7 @@ dependencies = [
 
 [[package]]
 name = "perry-transform"
-version = "0.2.101"
+version = "0.2.108"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -3401,7 +3401,7 @@ dependencies = [
 
 [[package]]
 name = "perry-types"
-version = "0.2.101"
+version = "0.2.108"
 dependencies = [
  "anyhow",
  "thiserror 1.0.69",

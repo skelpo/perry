@@ -874,6 +874,16 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         Expr::Await(inner) => {
             substitute_locals(inner, param_map, next_local_id);
         }
+        // Object literal
+        Expr::Object(fields) => {
+            for (_, value) in fields {
+                substitute_locals(value, param_map, next_local_id);
+            }
+        }
+        // JSON operations
+        Expr::JsonStringify(inner) | Expr::JsonParse(inner) => {
+            substitute_locals(inner, param_map, next_local_id);
+        }
         _ => {}
     }
 }

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.106
+**Current Version:** 0.2.108
 
 ## Workflow Requirements
 
@@ -238,6 +238,17 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.108
+- Fix function inlining not substituting LocalIds in Object literals and JSON operations
+  - Root cause: `substitute_locals` in inline.rs didn't handle `Expr::Object` or `Expr::JsonStringify`/`Expr::JsonParse`
+  - When inlining a function like `function getKey(node) { return JSON.stringify({ name: node.name }); }`,
+    the object literal `{ name: node.name }` kept `LocalGet(0)` from the inlined function's scope
+  - At the call site, `LocalGet(0)` didn't exist, causing "Undefined local variable: 0 (LocalGet)"
+  - Fix: Added handling for `Expr::Object` (recurse into field values) and `Expr::JsonStringify`/`Expr::JsonParse`
+    (recurse into inner expression) in the `substitute_locals` function
+
+### v0.2.107 (skipped, version sync)
 
 ### v0.2.106
 - Fix async closure Promise values not being detected by callers (Fastify handlers returning wrong values)
