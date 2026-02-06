@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.105
+**Current Version:** 0.2.106
 
 ## Workflow Requirements
 
@@ -238,6 +238,16 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.106
+- Fix async closure Promise values not being detected by callers (Fastify handlers returning wrong values)
+  - Root cause 1: Promise pointer was bitcast to F64, not NaN-boxed with POINTER_TAG
+  - Callers (like Fastify server) check `is_pointer()` to detect Promises, which requires POINTER_TAG
+  - Fix: Use `js_nanbox_pointer` instead of bitcast for async closure return values
+  - Root cause 2: `is_string_expr` in `compile_async_stmt` didn't recognize `Expr::ArrayJoin`
+  - `array.join()` results returned from async closures weren't NaN-boxed with STRING_TAG
+  - Fix: Added `Expr::ArrayJoin` pattern to `is_string_expr` helper function
+  - Now properly returns JSON responses from Fastify async handlers
 
 ### v0.2.105
 - Fix async closures (async arrow functions) returning 0 instead of Promise values

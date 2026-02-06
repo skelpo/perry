@@ -10660,8 +10660,12 @@ impl Compiler {
                     let undef_val = builder.ins().f64const(f64::from_bits(TAG_UNDEFINED));
                     builder.ins().call(resolve_ref, &[promise_ptr, undef_val]);
 
-                    // Closures return F64, so bitcast the Promise pointer
-                    let ret_val = builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr);
+                    // NaN-box the Promise pointer with POINTER_TAG so caller can detect it
+                    let nanbox_func = self.extern_funcs.get("js_nanbox_pointer")
+                        .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                    let nanbox_ref = self.module.declare_func_in_func(*nanbox_func, builder.func);
+                    let call = builder.ins().call(nanbox_ref, &[promise_ptr]);
+                    let ret_val = builder.inst_results(call)[0];
                     builder.ins().return_(&[ret_val]);
                 }
             } else {
@@ -11229,6 +11233,7 @@ fn compile_async_stmt(
             fn is_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
+                    Expr::ArrayJoin { .. } => true,  // array.join() returns a string
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                     Expr::NativeMethodCall { module, method, .. } => {
@@ -11304,9 +11309,14 @@ fn compile_async_stmt(
                 builder.ins().call(resolve_ref, &[promise_ptr, value_f64]);
             }
 
-            // Return the promise (bitcast to F64 for closures)
+            // Return the promise (NaN-boxed for closures so caller recognizes it as a pointer)
             let ret_val = if return_as_f64 {
-                builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr)
+                // NaN-box the Promise pointer with POINTER_TAG so caller can detect it
+                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let call = builder.ins().call(nanbox_ref, &[promise_ptr]);
+                builder.inst_results(call)[0]
             } else {
                 promise_ptr
             };
@@ -11324,9 +11334,14 @@ fn compile_async_stmt(
             let undef_val = builder.ins().f64const(f64::from_bits(TAG_UNDEFINED));
             builder.ins().call(resolve_ref, &[promise_ptr, undef_val]);
 
-            // Return the promise (bitcast to F64 for closures)
+            // Return the promise (NaN-boxed for closures so caller recognizes it as a pointer)
             let ret_val = if return_as_f64 {
-                builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr)
+                // NaN-box the Promise pointer with POINTER_TAG so caller can detect it
+                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let call = builder.ins().call(nanbox_ref, &[promise_ptr]);
+                builder.inst_results(call)[0]
             } else {
                 promise_ptr
             };
