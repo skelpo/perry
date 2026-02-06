@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.104
+**Current Version:** 0.2.105
 
 ## Workflow Requirements
 
@@ -238,6 +238,21 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.105
+- Fix async closures (async arrow functions) returning 0 instead of Promise values
+  - Root cause: `Expr::Closure` in HIR did not have an `is_async` field, so async arrow functions lost their async property during lowering
+  - Async closures were compiled with `compile_stmt` instead of `compile_async_stmt`, never creating a Promise
+  - Route handlers like `app.get('/api', async (req, reply) => { ... })` returned 0 instead of proper response
+  - Fixes:
+    1. Added `is_async: bool` field to `Expr::Closure` in ir.rs
+    2. Updated HIR lowering (lower.rs) to set `is_async` from arrow function and function expression
+    3. Updated monomorph.rs to preserve `is_async` during expression substitution
+    4. Updated codegen to track `is_async` in closure tuple type (8-element tuple)
+    5. Updated `declare_closure` to register async closures in `async_func_ids`
+    6. Updated `compile_closure` to create Promise and use `compile_async_stmt` for async closures
+    7. Added `return_as_f64` parameter to `compile_async_stmt` - closures return F64 (bitcast of Promise pointer) for ABI compatibility with `js_closure_call*` functions
+  - This fixes perry-demo benchmarks returning 0 - async route handlers now work correctly
 
 ### v0.2.104
 - Fix `['a', 'b'].join('-')` returning garbage value when returned directly from closures

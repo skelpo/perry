@@ -965,6 +965,8 @@ pub enum Expr {
         captures_this: bool,
         /// The enclosing class name if this closure captures `this` (for field access during codegen)
         enclosing_class: Option<String>,
+        /// Whether this is an async closure
+        is_async: bool,
     },
 
     // RegExp operations

@@ -5318,6 +5318,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                 mutable_captures,
                 captures_this,
                 enclosing_class,
+                is_async: arrow.is_async,
             })
         }
         ast::Expr::Fn(fn_expr) => {
@@ -5417,6 +5418,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                 mutable_captures,
                 captures_this,
                 enclosing_class: None,
+                is_async: fn_expr.function.is_async,
             })
         }
         ast::Expr::Await(await_expr) => {

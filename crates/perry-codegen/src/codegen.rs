@@ -798,7 +798,7 @@ impl Compiler {
         // Collect closures from ALL sources: functions, classes, and init statements
         // This MUST happen BEFORE compiling class methods that may contain closures
         // Tuple: (func_id, params, body, captures, mutable_captures, captures_this, enclosing_class)
-        let mut all_closures: Vec<(u32, Vec<perry_hir::Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, bool, Option<String>)> = Vec::new();
+        let mut all_closures: Vec<(u32, Vec<perry_hir::Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, bool, Option<String>, bool)> = Vec::new();
 
         // Collect from function bodies (no enclosing class)
         for func in &hir.functions {
@@ -853,7 +853,7 @@ impl Compiler {
         // Deduplicate closures by func_id (same closure may appear in class method and init statements)
         // Prefer entries with enclosing_class set (from class methods) over those without
         let mut seen_func_ids: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
-        let mut deduped_closures: Vec<(u32, Vec<perry_hir::Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, bool, Option<String>)> = Vec::new();
+        let mut deduped_closures: Vec<(u32, Vec<perry_hir::Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, bool, Option<String>, bool)> = Vec::new();
         for closure in all_closures {
             let func_id = closure.0;
             if let Some(&existing_idx) = seen_func_ids.get(&func_id) {
@@ -870,9 +870,9 @@ impl Compiler {
 
         // Declare all closures first, then compile them
         // If captures_this, we need an extra slot for the `this` pointer
-        for (func_id, params, _body, captures, _mutable_captures, captures_this, _enclosing_class) in &deduped_closures {
+        for (func_id, params, _body, captures, _mutable_captures, captures_this, _enclosing_class, is_async) in &deduped_closures {
             let capture_count = if *captures_this { captures.len() + 1 } else { captures.len() };
-            self.declare_closure(*func_id, params.len(), capture_count)?;
+            self.declare_closure(*func_id, params.len(), capture_count, *is_async)?;
         }
 
         // Collect FuncRef expressions that need closure-compatible wrappers
@@ -895,7 +895,7 @@ impl Compiler {
         self.collect_func_refs_needing_wrappers_from_stmts(&hir.init, &mut func_refs_needing_wrappers);
 
         // Also collect from closure bodies (closures may contain FuncRefs)
-        for (_, _, body, _, _, _, _) in &deduped_closures {
+        for (_, _, body, _, _, _, _, _) in &deduped_closures {
             self.collect_func_refs_needing_wrappers_from_stmts(body, &mut func_refs_needing_wrappers);
         }
 
@@ -924,8 +924,8 @@ impl Compiler {
         self.analyze_module_var_types(&hir.init);
 
         // Now compile closures (after wrappers are created and module vars are registered)
-        for (func_id, params, body, captures, mutable_captures, captures_this, enclosing_class) in deduped_closures {
-            self.compile_closure(func_id, &params, &body, &captures, &mutable_captures, captures_this, enclosing_class.as_deref())?;
+        for (func_id, params, body, captures, mutable_captures, captures_this, enclosing_class, is_async) in deduped_closures {
+            self.compile_closure(func_id, &params, &body, &captures, &mutable_captures, captures_this, enclosing_class.as_deref(), is_async)?;
         }
 
         // Compile class constructors and methods
@@ -9205,7 +9205,7 @@ impl Compiler {
             // For async functions, we need to handle returns specially
             if func.is_async {
                 for stmt in &func.body {
-                    compile_async_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, promise_var.unwrap(), &boxed_vars)
+                    compile_async_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, promise_var.unwrap(), &boxed_vars, false)
                         .map_err(|e| anyhow!("In async function '{}': {}", func.name, e))?;
                 }
 
@@ -9299,13 +9299,13 @@ impl Compiler {
 
     /// Collect all closures from statements (recursively) into a provided vector
     /// Tuple: (func_id, params, body, captures, mutable_captures, captures_this, enclosing_class)
-    fn collect_closures_from_stmts_into(&self, stmts: &[Stmt], closures: &mut Vec<(u32, Vec<perry_hir::Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, bool, Option<String>)>, enclosing_class: Option<&str>) {
+    fn collect_closures_from_stmts_into(&self, stmts: &[Stmt], closures: &mut Vec<(u32, Vec<perry_hir::Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, bool, Option<String>, bool)>, enclosing_class: Option<&str>) {
         for stmt in stmts {
             self.collect_closures_from_stmt(stmt, closures, enclosing_class);
         }
     }
 
-    fn collect_closures_from_stmt(&self, stmt: &Stmt, closures: &mut Vec<(u32, Vec<perry_hir::Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, bool, Option<String>)>, enclosing_class: Option<&str>) {
+    fn collect_closures_from_stmt(&self, stmt: &Stmt, closures: &mut Vec<(u32, Vec<perry_hir::Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, bool, Option<String>, bool)>, enclosing_class: Option<&str>) {
         match stmt {
             Stmt::Let { init: Some(expr), .. } => {
                 self.collect_closures_from_expr(expr, closures, enclosing_class);
@@ -9381,12 +9381,12 @@ impl Compiler {
         }
     }
 
-    fn collect_closures_from_expr(&self, expr: &Expr, closures: &mut Vec<(u32, Vec<perry_hir::Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, bool, Option<String>)>, enclosing_class: Option<&str>) {
+    fn collect_closures_from_expr(&self, expr: &Expr, closures: &mut Vec<(u32, Vec<perry_hir::Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, bool, Option<String>, bool)>, enclosing_class: Option<&str>) {
         match expr {
-            Expr::Closure { func_id, params, body, captures, mutable_captures, captures_this, enclosing_class: closure_class, .. } => {
+            Expr::Closure { func_id, params, return_type: _, body, captures, mutable_captures, captures_this, enclosing_class: closure_class, is_async } => {
                 // Use the enclosing_class stored in the Closure itself (set during lowering)
                 // This ensures the class context is preserved even after transformations
-                closures.push((*func_id, params.clone(), body.clone(), captures.clone(), mutable_captures.clone(), *captures_this, closure_class.clone()));
+                closures.push((*func_id, params.clone(), body.clone(), captures.clone(), mutable_captures.clone(), *captures_this, closure_class.clone(), *is_async));
                 // Also collect nested closures (they inherit the enclosing class from the outer closure)
                 let nested_class = closure_class.as_deref().or(enclosing_class);
                 for stmt in body {
@@ -10299,7 +10299,7 @@ impl Compiler {
     }
 
     /// Declare a closure function
-    fn declare_closure(&mut self, func_id: u32, param_count: usize, capture_count: usize) -> Result<()> {
+    fn declare_closure(&mut self, func_id: u32, param_count: usize, capture_count: usize, is_async: bool) -> Result<()> {
         let mut sig = self.module.make_signature();
 
         // First parameter is the closure pointer (for accessing captures)
@@ -10310,8 +10310,12 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::F64));
         }
 
-        // Return type
+        // All closures return F64 for consistent ABI with js_closure_call* functions
+        // For async closures, the Promise pointer (I64) is bitcast to F64
         sig.returns.push(AbiParam::new(types::F64));
+        if is_async {
+            self.async_func_ids.insert(func_id);
+        }
 
         let func_name = format!("__closure_{}", func_id);
         let clif_func_id = self.module.declare_function(&func_name, Linkage::Local, &sig)?;
@@ -10321,7 +10325,7 @@ impl Compiler {
     }
 
     /// Compile a closure function
-    fn compile_closure(&mut self, func_id: u32, params: &[perry_hir::Param], body: &[Stmt], captures: &[LocalId], mutable_captures: &[LocalId], captures_this: bool, enclosing_class: Option<&str>) -> Result<()> {
+    fn compile_closure(&mut self, func_id: u32, params: &[perry_hir::Param], body: &[Stmt], captures: &[LocalId], mutable_captures: &[LocalId], captures_this: bool, enclosing_class: Option<&str>, is_async: bool) -> Result<()> {
         let clif_func_id = *self.closure_func_ids.get(&func_id)
             .ok_or_else(|| anyhow!("Closure not declared: {}", func_id))?;
 
@@ -10335,6 +10339,8 @@ impl Compiler {
         for _ in params {
             self.ctx.func.signature.params.push(AbiParam::new(types::F64));
         }
+        // All closures return F64 for consistent ABI with js_closure_call* functions
+        // Async closures bitcast Promise pointer to F64 before returning
         self.ctx.func.signature.returns.push(AbiParam::new(types::F64));
 
         // Build a set of mutable captures for quick lookup
@@ -10594,44 +10600,109 @@ impl Compiler {
                 None
             };
 
-            // Compile the body
-            for stmt in body {
-                compile_stmt(
-                    &mut builder,
-                    &mut self.module,
-                    &self.func_ids,
-                    &self.closure_func_ids,
-                    &self.func_wrapper_ids,
-                    &self.extern_funcs,
-                    &self.async_func_ids,
-                    &self.closure_returning_funcs,
-                    &self.classes,
-                    &self.enums,
-                    &self.func_param_types,
-                    &self.func_union_params,
-                    &self.func_return_types,
-                    &self.func_hir_return_types,
-                    &self.func_rest_param_index,
-                    &self.imported_func_param_counts,
-                    &mut locals,
-                    &mut next_var,
-                    stmt,
-                    this_ctx.as_ref(),
-                    None,
-                    &boxed_vars,
-                ).map_err(|e| anyhow!("In closure (func_id={}, captures={:?}): {}", func_id, captures, e))?;
-            }
+            // For async closures, create a Promise variable to track
+            let promise_var = if is_async {
+                let var = Variable::new(next_temp_var_id());
+                builder.declare_var(var, types::I64);
 
-            // If no explicit return, return 0 with correct type
-            let current_block = builder.current_block().unwrap();
-            if !is_block_filled(&builder, current_block) {
-                let ret_type = builder.func.signature.returns.first().map(|p| p.value_type).unwrap_or(types::F64);
-                let zero = match ret_type {
-                    types::I64 => builder.ins().iconst(types::I64, 0),
-                    types::I32 => builder.ins().iconst(types::I32, 0),
-                    _ => builder.ins().f64const(0.0),
-                };
-                builder.ins().return_(&[zero]);
+                // Allocate the promise: js_promise_new()
+                let promise_new = self.extern_funcs.get("js_promise_new")
+                    .ok_or_else(|| anyhow!("js_promise_new not declared"))?;
+                let func_ref = self.module.declare_func_in_func(*promise_new, builder.func);
+                let call = builder.ins().call(func_ref, &[]);
+                let promise_ptr = builder.inst_results(call)[0];
+                builder.def_var(var, promise_ptr);
+
+                Some(var)
+            } else {
+                None
+            };
+
+            // Compile the body - use compile_async_stmt for async closures
+            if is_async {
+                for stmt in body {
+                    compile_async_stmt(
+                        &mut builder,
+                        &mut self.module,
+                        &self.func_ids,
+                        &self.closure_func_ids,
+                        &self.func_wrapper_ids,
+                        &self.extern_funcs,
+                        &self.async_func_ids,
+                        &self.closure_returning_funcs,
+                        &self.classes,
+                        &self.enums,
+                        &self.func_param_types,
+                        &self.func_union_params,
+                        &self.func_return_types,
+                        &self.func_hir_return_types,
+                        &self.func_rest_param_index,
+                        &self.imported_func_param_counts,
+                        &mut locals,
+                        &mut next_var,
+                        stmt,
+                        promise_var.unwrap(),
+                        &boxed_vars,
+                        true,  // Closures return F64, so bitcast Promise pointer
+                    ).map_err(|e| anyhow!("In async closure (func_id={}, captures={:?}): {}", func_id, captures, e))?;
+                }
+
+                // If no explicit return, resolve with undefined and return the promise
+                let current_block = builder.current_block().unwrap();
+                if !is_block_filled(&builder, current_block) {
+                    let promise_ptr = builder.use_var(promise_var.unwrap());
+
+                    // Resolve with undefined
+                    let resolve_func = self.extern_funcs.get("js_promise_resolve")
+                        .ok_or_else(|| anyhow!("js_promise_resolve not declared"))?;
+                    let resolve_ref = self.module.declare_func_in_func(*resolve_func, builder.func);
+                    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                    let undef_val = builder.ins().f64const(f64::from_bits(TAG_UNDEFINED));
+                    builder.ins().call(resolve_ref, &[promise_ptr, undef_val]);
+
+                    // Closures return F64, so bitcast the Promise pointer
+                    let ret_val = builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr);
+                    builder.ins().return_(&[ret_val]);
+                }
+            } else {
+                for stmt in body {
+                    compile_stmt(
+                        &mut builder,
+                        &mut self.module,
+                        &self.func_ids,
+                        &self.closure_func_ids,
+                        &self.func_wrapper_ids,
+                        &self.extern_funcs,
+                        &self.async_func_ids,
+                        &self.closure_returning_funcs,
+                        &self.classes,
+                        &self.enums,
+                        &self.func_param_types,
+                        &self.func_union_params,
+                        &self.func_return_types,
+                        &self.func_hir_return_types,
+                        &self.func_rest_param_index,
+                        &self.imported_func_param_counts,
+                        &mut locals,
+                        &mut next_var,
+                        stmt,
+                        this_ctx.as_ref(),
+                        None,
+                        &boxed_vars,
+                    ).map_err(|e| anyhow!("In closure (func_id={}, captures={:?}): {}", func_id, captures, e))?;
+                }
+
+                // If no explicit return, return 0 with correct type
+                let current_block = builder.current_block().unwrap();
+                if !is_block_filled(&builder, current_block) {
+                    let ret_type = builder.func.signature.returns.first().map(|p| p.value_type).unwrap_or(types::F64);
+                    let zero = match ret_type {
+                        types::I64 => builder.ins().iconst(types::I64, 0),
+                        types::I32 => builder.ins().iconst(types::I32, 0),
+                        _ => builder.ins().f64const(0.0),
+                    };
+                    builder.ins().return_(&[zero]);
+                }
             }
 
             builder.finalize();
@@ -11113,6 +11184,7 @@ fn compile_async_stmt(
     stmt: &Stmt,
     promise_var: Variable,
     boxed_vars: &std::collections::HashSet<LocalId>,
+    return_as_f64: bool,  // If true, bitcast Promise pointer to F64 before returning (for closures)
 ) -> Result<()> {
     match stmt {
         Stmt::Return(Some(expr)) => {
@@ -11232,8 +11304,13 @@ fn compile_async_stmt(
                 builder.ins().call(resolve_ref, &[promise_ptr, value_f64]);
             }
 
-            // Return the promise
-            builder.ins().return_(&[promise_ptr]);
+            // Return the promise (bitcast to F64 for closures)
+            let ret_val = if return_as_f64 {
+                builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr)
+            } else {
+                promise_ptr
+            };
+            builder.ins().return_(&[ret_val]);
             Ok(())
         }
         Stmt::Return(None) => {
@@ -11247,7 +11324,13 @@ fn compile_async_stmt(
             let undef_val = builder.ins().f64const(f64::from_bits(TAG_UNDEFINED));
             builder.ins().call(resolve_ref, &[promise_ptr, undef_val]);
 
-            builder.ins().return_(&[promise_ptr]);
+            // Return the promise (bitcast to F64 for closures)
+            let ret_val = if return_as_f64 {
+                builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr)
+            } else {
+                promise_ptr
+            };
+            builder.ins().return_(&[ret_val]);
             Ok(())
         }
         // Handle If statements specially to ensure nested returns are compiled correctly
@@ -11273,7 +11356,7 @@ fn compile_async_stmt(
             builder.switch_to_block(then_block);
             builder.seal_block(then_block);
             for s in then_branch {
-                compile_async_stmt(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, closure_returning_funcs, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, next_var, s, promise_var, boxed_vars)?;
+                compile_async_stmt(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, closure_returning_funcs, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, next_var, s, promise_var, boxed_vars, return_as_f64)?;
             }
             let current = builder.current_block().unwrap();
             if !is_block_filled(builder, current) {
@@ -11285,7 +11368,7 @@ fn compile_async_stmt(
             builder.seal_block(else_block);
             if let Some(else_stmts) = else_branch {
                 for s in else_stmts {
-                    compile_async_stmt(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, closure_returning_funcs, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, next_var, s, promise_var, boxed_vars)?;
+                    compile_async_stmt(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, closure_returning_funcs, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, next_var, s, promise_var, boxed_vars, return_as_f64)?;
                 }
             }
             let current = builder.current_block().unwrap();
