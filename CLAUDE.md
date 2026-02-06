@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.110
+**Current Version:** 0.2.111
 
 ## Workflow Requirements
 
@@ -238,6 +238,16 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.111
+- Fix constructor parameter type declarations causing Cranelift verifier panics
+  - Root cause: In class constructor compilation, all parameters were declared as F64 regardless of their type
+  - If a constructor parameter was a string, array, or object type, `is_pointer` would be set to true
+  - Later, when LocalSet tried to assign an I64 value to the variable, it would fail with
+    "declared type of variable var0 doesn't match type of value"
+  - Fix: Compute `is_pointer` and `is_union` BEFORE declaring the variable, and use the correct type
+    (`types::I64` for pointer types without union, `types::F64` otherwise)
+  - Also fixed the LocalInfo to use the correct `is_pointer` and `is_union` values
 
 ### v0.2.110
 - Fix module-level variable LocalIds overwriting function parameter LocalIds

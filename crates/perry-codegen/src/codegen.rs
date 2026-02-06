@@ -2094,26 +2094,30 @@ impl Compiler {
             for (i, param) in ctor.params.iter().enumerate() {
                 let var = Variable::new(next_var);
                 next_var += 1;
-                builder.declare_var(var, types::F64);
-                let val = builder.block_params(entry_block)[i + 1]; // +1 to skip 'this'
-                builder.def_var(var, val);
                 // Check parameter types for correct handling of string methods, array methods, etc.
                 let is_closure = matches!(param.ty, perry_types::Type::Function(_));
                 let is_string = matches!(param.ty, perry_types::Type::String);
                 let is_array = matches!(param.ty, perry_types::Type::Array(_));
-                let is_pointer = is_closure || is_string || is_array;
+                let is_union = matches!(param.ty, perry_types::Type::Any | perry_types::Type::Union(_) | perry_types::Type::Unknown);
+                let is_pointer = is_closure || is_string || is_array ||
+                    matches!(param.ty, perry_types::Type::Object(_) | perry_types::Type::Named(_) | perry_types::Type::Promise(_));
+                // Declare variable with correct type (I64 for pointers without union, F64 otherwise)
+                let var_type = if is_pointer && !is_union { types::I64 } else { types::F64 };
+                builder.declare_var(var, var_type);
+                let val = builder.block_params(entry_block)[i + 1]; // +1 to skip 'this'
+                builder.def_var(var, val);
                 locals.insert(param.id, LocalInfo {
                     var,
                     name: Some(param.name.clone()),
                     class_name: None,
                     type_args: Vec::new(),
-                    is_pointer,
+                    is_pointer: is_pointer && !is_union,
                     is_array,
                     is_string,
                     is_bigint: false,
                     is_closure,
                     is_boxed: false,
-                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
+                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union,
                     is_mixed_array: false,
                     is_integer: false,
                     is_integer_array: false,
