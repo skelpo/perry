@@ -151,6 +151,8 @@ fn string_data(s: *const StringHeader) -> *const u8 {
 fn string_as_str<'a>(s: *const StringHeader) -> &'a str {
     unsafe {
         let len = (*s).length as usize;
+        let cap = (*s).capacity as usize;
+        debug_assert!(len <= cap, "StringHeader length {} > capacity {}", len, cap);
         let data = string_data(s);
         let bytes = slice::from_raw_parts(data, len);
         str::from_utf8_unchecked(bytes)
@@ -531,27 +533,16 @@ pub extern "C" fn js_string_split(s: *const StringHeader, delimiter: *const Stri
         string_as_str(delimiter)
     };
 
-    // Split the string
-    let parts: Vec<&str> = if delim.is_empty() {
-        // Empty delimiter: split into characters
-        str_data.chars().map(|c| {
-            // We need to create substrings for each char
-            // This is tricky with &str, so we'll handle it differently
-            ""  // Placeholder, we'll handle below
-        }).collect()
-    } else {
-        str_data.split(delim).collect()
-    };
-
-    // Handle empty delimiter specially - split into characters
+    // Split into string parts
     let parts: Vec<*mut StringHeader> = if delim.is_empty() {
+        // Empty delimiter: split into individual characters (single pass)
         str_data.chars().map(|c| {
             let mut buf = [0u8; 4];
             let char_str = c.encode_utf8(&mut buf);
             js_string_from_bytes(char_str.as_ptr(), char_str.len() as u32)
         }).collect()
     } else {
-        parts.iter().map(|part| {
+        str_data.split(delim).map(|part| {
             js_string_from_bytes(part.as_ptr(), part.len() as u32)
         }).collect()
     };
@@ -613,7 +604,9 @@ pub extern "C" fn js_string_pad_start(s: *const StringHeader, target_length: u32
     // Append original string
     result.push_str(str_data);
 
-    js_string_from_bytes(result.as_ptr(), result.len() as u32)
+    let ret = js_string_from_bytes(result.as_ptr(), result.len() as u32);
+    std::hint::black_box(&result);
+    ret
 }
 
 /// Pad the end of a string to reach target length
@@ -645,7 +638,9 @@ pub extern "C" fn js_string_pad_end(s: *const StringHeader, target_length: u32, 
         pad_idx += 1;
     }
 
-    js_string_from_bytes(result.as_ptr(), result.len() as u32)
+    let ret = js_string_from_bytes(result.as_ptr(), result.len() as u32);
+    std::hint::black_box(&result);
+    ret
 }
 
 /// Repeat a string a specified number of times
@@ -664,7 +659,9 @@ pub extern "C" fn js_string_repeat(s: *const StringHeader, count: i32) -> *mut S
 
     let count = count as usize;
     let result = str_data.repeat(count);
-    js_string_from_bytes(result.as_ptr(), result.len() as u32)
+    let ret = js_string_from_bytes(result.as_ptr(), result.len() as u32);
+    std::hint::black_box(&result);
+    ret
 }
 
 #[cfg(test)]

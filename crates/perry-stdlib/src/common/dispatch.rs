@@ -150,26 +150,26 @@ unsafe fn dispatch_fastify_context(handle: i64, method: &str, args: &[f64]) -> f
         // Request methods
         "method" => {
             let ptr = crate::fastify::js_fastify_req_method(handle);
-            JSValue::string_ptr(ptr).bits() as f64
+            f64::from_bits(JSValue::string_ptr(ptr).bits())
         }
         "url" => {
             let ptr = crate::fastify::js_fastify_req_url(handle);
-            JSValue::string_ptr(ptr).bits() as f64
+            f64::from_bits(JSValue::string_ptr(ptr).bits())
         }
         "body" => {
             let ptr = crate::fastify::js_fastify_req_body(handle);
-            JSValue::string_ptr(ptr).bits() as f64
+            f64::from_bits(JSValue::string_ptr(ptr).bits())
         }
         "json" => {
             crate::fastify::js_fastify_req_json(handle)
         }
         "params" => {
             let ptr = crate::fastify::js_fastify_req_params(handle);
-            JSValue::string_ptr(ptr).bits() as f64
+            f64::from_bits(JSValue::string_ptr(ptr).bits())
         }
         "headers" => {
             let ptr = crate::fastify::js_fastify_req_headers(handle);
-            JSValue::string_ptr(ptr).bits() as f64
+            f64::from_bits(JSValue::string_ptr(ptr).bits())
         }
         _ => {
             // Unknown method - return undefined
@@ -207,7 +207,7 @@ pub unsafe extern "C" fn js_handle_property_dispatch(
                 if ptr.is_null() {
                     f64::from_bits(0x7FFC_0000_0000_0001)
                 } else {
-                    JSValue::string_ptr(ptr).bits() as f64
+                    f64::from_bits(JSValue::string_ptr(ptr).bits())
                 }
             }
             "body" => {
@@ -215,7 +215,7 @@ pub unsafe extern "C" fn js_handle_property_dispatch(
                 if ptr.is_null() {
                     f64::from_bits(0x7FFC_0000_0000_0001)
                 } else {
-                    JSValue::string_ptr(ptr).bits() as f64
+                    f64::from_bits(JSValue::string_ptr(ptr).bits())
                 }
             }
             "headers" => {
@@ -223,7 +223,7 @@ pub unsafe extern "C" fn js_handle_property_dispatch(
                 if ptr.is_null() {
                     f64::from_bits(0x7FFC_0000_0000_0001)
                 } else {
-                    JSValue::string_ptr(ptr).bits() as f64
+                    f64::from_bits(JSValue::string_ptr(ptr).bits())
                 }
             }
             "method" => {
@@ -231,7 +231,7 @@ pub unsafe extern "C" fn js_handle_property_dispatch(
                 if ptr.is_null() {
                     f64::from_bits(0x7FFC_0000_0000_0001)
                 } else {
-                    JSValue::string_ptr(ptr).bits() as f64
+                    f64::from_bits(JSValue::string_ptr(ptr).bits())
                 }
             }
             "url" => {
@@ -239,7 +239,7 @@ pub unsafe extern "C" fn js_handle_property_dispatch(
                 if ptr.is_null() {
                     f64::from_bits(0x7FFC_0000_0000_0001)
                 } else {
-                    JSValue::string_ptr(ptr).bits() as f64
+                    f64::from_bits(JSValue::string_ptr(ptr).bits())
                 }
             }
             _ => f64::from_bits(0x7FFC_0000_0000_0001), // undefined

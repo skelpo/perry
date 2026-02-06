@@ -327,16 +327,13 @@ fn event_loop(app_handle: Handle, request_rx: &mut mpsc::Receiver<FastifyPending
                 // Check if handler returned a promise (NaN-boxed pointer to a Promise)
                 let mut final_result = result;
                 let jsv = JSValue::from_bits(result.to_bits());
-                eprintln!("[DEBUG] result bits=0x{:016X} is_pointer={}", result.to_bits(), jsv.is_pointer());
                 if jsv.is_pointer() {
                     let ptr = jsv.as_pointer::<perry_runtime::Promise>();
-                    eprintln!("[DEBUG] ptr={:p} is_promise={}", ptr, unsafe { perry_runtime::js_is_promise(ptr as *mut perry_runtime::Promise) });
                     // Try to treat it as a promise and wait for it
                     if unsafe { perry_runtime::js_is_promise(ptr as *mut perry_runtime::Promise) } != 0 {
                         wait_for_promise(ptr as *mut perry_runtime::Promise);
                         // Extract the resolved value from the promise
                         final_result = unsafe { perry_runtime::js_promise_value(ptr as *mut perry_runtime::Promise) };
-                        eprintln!("[DEBUG] promise value bits=0x{:016X}", final_result.to_bits());
                     }
                 }
 

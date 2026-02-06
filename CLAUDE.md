@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.113
+**Current Version:** 0.2.114
 
 ## Workflow Requirements
 
@@ -264,9 +264,20 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.113)
+## Recent Fixes (v0.2.37-0.2.114)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.114
+- Fix Fastify request properties (`request.method`, `request.url`, etc.) returning numbers instead of strings
+  - Root cause: `JSValue::string_ptr(ptr).bits() as f64` uses Rust's numeric conversion, NOT bitcast
+  - In Rust, `u64 as f64` converts the integer VALUE to a floating-point number (e.g., 0x7FFF... becomes 9.22e18)
+  - This corrupted the NaN-boxed STRING_TAG value, causing console.log to print the raw number
+  - Fix: Change `JSValue::string_ptr(ptr).bits() as f64` to `f64::from_bits(JSValue::string_ptr(ptr).bits())`
+  - `f64::from_bits()` interprets the bits directly as a float (preserving the NaN-boxing)
+  - Fixed in: `perry-stdlib/src/common/dispatch.rs` (13 occurrences) and `perry-runtime/src/object.rs` (5 occurrences)
+  - Before: `console.log("method:", request.method)` → "method: 9223090566290150400"
+  - After: `console.log("method:", request.method)` → "method: GET"
 
 ### v0.2.113
 - Document and support known limitations: No GC, No Runtime Type Checking, Single-Threaded

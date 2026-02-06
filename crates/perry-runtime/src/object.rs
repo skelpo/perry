@@ -643,19 +643,19 @@ pub unsafe extern "C" fn js_native_call_method(
                     n.to_string()
                 };
                 let str_ptr = crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32);
-                return JSValue::string_ptr(str_ptr).bits() as f64;
+                return f64::from_bits(JSValue::string_ptr(str_ptr).bits());
             } else if jsval.is_bool() {
                 let s = if jsval.as_bool() { "true" } else { "false" };
                 let str_ptr = crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32);
-                return JSValue::string_ptr(str_ptr).bits() as f64;
+                return f64::from_bits(JSValue::string_ptr(str_ptr).bits());
             } else if jsval.is_undefined() {
                 let s = "undefined";
                 let str_ptr = crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32);
-                return JSValue::string_ptr(str_ptr).bits() as f64;
+                return f64::from_bits(JSValue::string_ptr(str_ptr).bits());
             } else if jsval.is_null() {
                 let s = "null";
                 let str_ptr = crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32);
-                return JSValue::string_ptr(str_ptr).bits() as f64;
+                return f64::from_bits(JSValue::string_ptr(str_ptr).bits());
             }
         }
 
@@ -717,7 +717,7 @@ pub unsafe extern "C" fn js_native_call_method(
     }
 
     // Method not found - return undefined
-    JSValue::undefined().bits() as f64
+    f64::from_bits(JSValue::undefined().bits())
 }
 
 /// Special class ID for native module namespace objects

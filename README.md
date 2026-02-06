@@ -229,7 +229,7 @@ perry build main.ts -o myapp
 | **console** | ✅ Full | log() for numbers, strings, booleans |
 | **fs** | ✅ Full | readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync |
 | **path** | ✅ Full | join, dirname, basename, extname, resolve |
-| **process** | ✅ Full | process.env.VARNAME |
+| **process** | ✅ Full | process.env, process.exit(), process.cwd(), process.argv, process.uptime(), process.memoryUsage() |
 | **JSON** | ✅ Full | parse, stringify |
 | **Math** | ✅ Full | floor, ceil, round, abs, sqrt, pow, min, max, random |
 | **Date** | ✅ Full | Date.now(), new Date(), getTime(), toISOString(), component getters |
@@ -357,9 +357,9 @@ server.close();
 
 ### Runtime Characteristics
 
-- **No Garbage Collection** - Memory is not automatically freed (use for short-running programs or manage manually)
-- **No Runtime Type Checking** - Types are erased at compile time
-- **Single-Threaded** - No multi-threading support yet
+- **No Garbage Collection** - Memory is allocated via a fast bump arena (8MB blocks) and never individually freed. Best suited for short-running programs. Use `process.memoryUsage()` to monitor arena usage at runtime (`rss`, `heapTotal`, `heapUsed`).
+- **No Runtime Type Checking** - TypeScript types are erased at compile time; `as` casts are no-ops. Use `typeof` (returns `"string"`, `"number"`, `"boolean"`, `"object"`, `"function"`, `"undefined"`) and `instanceof` for runtime type inspection.
+- **Single-Threaded** - User code runs on a single thread. Async I/O (database, HTTP, WebSocket) runs on background worker threads with callbacks dispatched on the main thread.
 
 ---
 

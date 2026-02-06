@@ -721,8 +721,15 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
             }
         }
 
-        // Create result string
-        js_string_from_bytes(result.as_ptr(), result.len() as u32)
+        // Create result string - extract ptr/len before passing to avoid
+        // potential LLVM reordering of String drop vs copy_nonoverlapping
+        let result_ptr = result.as_ptr();
+        let result_len = result.len() as u32;
+        let ret = js_string_from_bytes(result_ptr, result_len);
+        // Ensure result String stays alive until after the copy completes
+        std::hint::black_box(&result);
+        drop(result);
+        ret
     }
 }
 

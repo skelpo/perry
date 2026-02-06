@@ -238,13 +238,6 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
 
     let jsval = JSValue::from_bits(value.to_bits());
 
-    // Debug: check what type we're detecting
-    let bits = value.to_bits();
-    if bits > 0x7FF0_0000_0000_0000 && (bits >> 48) != 0x7FF8 {
-        eprintln!("[DEBUG format_jsvalue] bits=0x{:016X} is_string={} is_pointer={} is_undefined={} is_null={}",
-            bits, jsval.is_string(), jsval.is_pointer(), jsval.is_undefined(), jsval.is_null());
-    }
-
     unsafe {
         if jsval.is_undefined() {
             "undefined".to_string()
@@ -563,12 +556,9 @@ pub extern "C" fn js_console_log_spread(arr_ptr: *const crate::array::ArrayHeade
         let length = (*arr_ptr).length as usize;
         let data_ptr = (arr_ptr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
 
-        eprintln!("[DEBUG js_console_log_spread] array length={}", length);
         let mut parts: Vec<String> = Vec::with_capacity(length);
         for i in 0..length {
             let value = *data_ptr.add(i);
-            let bits = value.to_bits();
-            eprintln!("[DEBUG spread] i={} bits=0x{:016X}", i, bits);
             parts.push(format_jsvalue(value, 0));
         }
         println!("{}", parts.join(" "));

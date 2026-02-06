@@ -453,16 +453,11 @@ pub extern "C" fn js_get_string_pointer_unified(value: f64) -> i64 {
     }
 
     // Otherwise, assume it's a raw pointer bitcast to f64
-    // This handles locally-created strings that were stored via bitcast
-    // We can detect this by checking if the upper bits look like a valid pointer
-    // (most pointers have the upper bits as 0 or small values)
     let upper_16 = bits >> 48;
     if upper_16 < 0x7FFC {
-        // Looks like a raw pointer (not a tagged NaN-box value)
         return bits as i64;
     }
 
-    // If it's some other tagged value, return 0
     0
 }
 
