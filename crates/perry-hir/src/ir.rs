@@ -658,6 +658,8 @@ pub enum Expr {
     ProcessCwd,
     // Process command line arguments: process.argv -> string[]
     ProcessArgv,
+    // Process memory usage: process.memoryUsage() -> object { rss, heapTotal, heapUsed, external, arrayBuffers }
+    ProcessMemoryUsage,
 
     // File system operations
     FsReadFileSync(Box<Expr>),           // fs.readFileSync(path) -> string

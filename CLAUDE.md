@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.111
+**Current Version:** 0.2.113
 
 ## Workflow Requirements
 
@@ -188,6 +188,35 @@ Callbacks are invoked via `js_closure_call1(closure, value)` which properly pass
 - fetch() with custom headers
 - Multi-module compilation with imports/exports
 
+## Known Limitations
+
+### No Garbage Collection
+Perry uses a **bump arena allocator** (`crates/perry-runtime/src/arena.rs`) for all heap objects. Memory is never individually freed — the arena grows in 8MB blocks and objects persist for the lifetime of the process. This design gives O(1) allocation speed but means:
+- **Best suited for short-running programs** (CLI tools, scripts, batch jobs, request handlers)
+- Long-running programs will gradually consume more memory
+- No reference counting, no tracing GC, no mark-and-sweep
+- `process.memoryUsage()` is available to monitor arena usage at runtime:
+  - `rss` - Resident Set Size (total process memory from OS)
+  - `heapTotal` - Total arena capacity (8MB per block)
+  - `heapUsed` - Bytes allocated within arena blocks
+  - `external` / `arrayBuffers` - Always 0 (not tracked)
+
+### No Runtime Type Checking
+TypeScript types are **erased at compile time**. Perry compiles based on inferred types and NaN-boxing tags, but does not enforce TypeScript's type system at runtime:
+- `as` casts are no-ops (no runtime validation)
+- Type guards (`if (typeof x === 'string')`) work via `typeof` operator, which correctly inspects NaN-boxing tags at runtime
+- `typeof` returns: `"number"`, `"string"`, `"boolean"`, `"object"`, `"function"`, `"undefined"` — including `"function"` for closures
+- `instanceof` works for class instances via class ID chain
+- Union-typed variables use NaN-boxed F64 for runtime dispatch
+- There is no runtime enforcement of interfaces, generic constraints, or type assertions
+
+### Single-Threaded
+User code runs on a **single thread**. There is no `Worker`, `SharedArrayBuffer`, or `Atomics` support:
+- Async I/O (database queries, HTTP, WebSocket) runs on a 4-thread tokio worker pool
+- Promise callbacks and user code always execute on the main thread
+- Thread-local arenas mean JSValues cannot be shared between threads
+- The `spawn_for_promise_deferred()` pattern ensures safe cross-thread data transfer
+
 ## Test Files
 
 Root-level `test_*.ts` files serve as integration tests for various language features:
@@ -235,19 +264,37 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.95)
+## Recent Fixes (v0.2.37-0.2.113)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
 
+### v0.2.113
+- Document and support known limitations: No GC, No Runtime Type Checking, Single-Threaded
+- Add `process.memoryUsage()` support matching Node.js API
+  - Returns object with `{ rss, heapTotal, heapUsed, external, arrayBuffers }`
+  - `rss` uses platform-specific APIs (mach_task_basic_info on macOS, /proc/self/statm on Linux)
+  - `heapTotal`/`heapUsed` reports arena allocator stats via new `js_arena_stats` function
+  - Added `ProcessMemoryUsage` HIR variant, lowering, and codegen
+- Fix `typeof` returning `"object"` for closures - now correctly returns `"function"`
+  - Root cause: Closures use POINTER_TAG (same as objects/arrays), so `js_value_typeof` couldn't distinguish them
+  - Fix: Added `CLOSURE_MAGIC` (0x434C4F53) type tag to `ClosureHeader.type_tag` field (previously `_reserved`)
+  - `js_value_typeof` now reads the tag at offset 12 of POINTER_TAG values to detect closures
+- Added "Known Limitations" section to CLAUDE.md documenting all three constraints
+
+### v0.2.112
+- Fix constructor parameter variable declarations causing Cranelift verifier type mismatch
+  - Root cause: v0.2.111 changed constructor parameter variable declarations from F64 to I64 for pointer types
+  - But constructor signatures declare ALL parameters as F64 (NaN-boxed values) at function signature level
+  - When `builder.block_params(entry_block)[i]` returned F64 and `builder.def_var(var, val)` expected I64,
+    Cranelift verifier failed with "declared type of variable var1 doesn't match type of value v1"
+  - Fix: Revert variable declaration to always use F64 (matching the signature)
+  - Set `is_pointer: false` since constructor params are NaN-boxed F64 values, not raw I64 pointers
+  - The `is_array`/`is_string`/`is_closure` flags indicate the type for proper NaN-box extraction at usage time
+
 ### v0.2.111
-- Fix constructor parameter type declarations causing Cranelift verifier panics
-  - Root cause: In class constructor compilation, all parameters were declared as F64 regardless of their type
-  - If a constructor parameter was a string, array, or object type, `is_pointer` would be set to true
-  - Later, when LocalSet tried to assign an I64 value to the variable, it would fail with
-    "declared type of variable var0 doesn't match type of value"
-  - Fix: Compute `is_pointer` and `is_union` BEFORE declaring the variable, and use the correct type
-    (`types::I64` for pointer types without union, `types::F64` otherwise)
-  - Also fixed the LocalInfo to use the correct `is_pointer` and `is_union` values
+- Attempt to fix constructor parameter type declarations (partially incorrect - fixed in v0.2.112)
+  - Computed `is_pointer` and `is_union` before variable declaration
+  - Changed variable type to I64 for pointer types - this was wrong because signature uses F64
 
 ### v0.2.110
 - Fix module-level variable LocalIds overwriting function parameter LocalIds

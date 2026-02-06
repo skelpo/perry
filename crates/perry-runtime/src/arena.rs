@@ -94,3 +94,23 @@ pub fn arena_alloc(size: usize, _align: usize) -> *mut u8 {
 pub extern "C" fn js_arena_alloc(size: u32) -> *mut u8 {
     arena_alloc(size as usize, 8)
 }
+
+/// Get arena memory statistics: (heap_used, heap_total)
+/// heap_used = total bytes allocated across all blocks
+/// heap_total = total bytes reserved across all blocks
+#[no_mangle]
+pub extern "C" fn js_arena_stats(out_used: *mut u64, out_total: *mut u64) {
+    ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        let mut used: u64 = 0;
+        let mut total: u64 = 0;
+        for block in &arena.blocks {
+            used += block.offset as u64;
+            total += block.size as u64;
+        }
+        unsafe {
+            *out_used = used;
+            *out_total = total;
+        }
+    });
+}

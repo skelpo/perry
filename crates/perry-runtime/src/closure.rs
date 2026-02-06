@@ -7,6 +7,10 @@
 
 use std::alloc::{alloc, Layout};
 
+/// Magic value stored in ClosureHeader._reserved to identify closures at runtime.
+/// Used by js_value_typeof to return "function" instead of "object" for closures.
+pub const CLOSURE_MAGIC: u32 = 0x434C_4F53; // "CLOS" in ASCII
+
 /// Header for heap-allocated closures
 #[repr(C)]
 pub struct ClosureHeader {
@@ -14,8 +18,8 @@ pub struct ClosureHeader {
     pub func_ptr: *const u8,
     /// Number of captured values
     pub capture_count: u32,
-    /// Reserved for future use (e.g., closure type tag)
-    pub _reserved: u32,
+    /// Type tag: set to CLOSURE_MAGIC to identify closures at runtime
+    pub type_tag: u32,
 }
 
 /// Allocate a closure with space for captured values
@@ -34,7 +38,7 @@ pub extern "C" fn js_closure_alloc(func_ptr: *const u8, capture_count: u32) -> *
 
         (*ptr).func_ptr = func_ptr;
         (*ptr).capture_count = capture_count;
-        (*ptr)._reserved = 0;
+        (*ptr).type_tag = CLOSURE_MAGIC;
 
         ptr
     }

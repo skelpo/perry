@@ -3136,6 +3136,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     match method_name {
                                         "uptime" => return Ok(Expr::ProcessUptime),
                                         "cwd" => return Ok(Expr::ProcessCwd),
+                                        "memoryUsage" => return Ok(Expr::ProcessMemoryUsage),
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -3846,9 +3847,25 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                             if let ast::Expr::Ident(arr_ident) = member.obj.as_ref() {
                                 let arr_name = arr_ident.sym.to_string();
                                 // Check that this is NOT a String type (Array, Set, Map are all OK)
-                                let is_not_string = ctx.lookup_local_type(&arr_name)
-                                    .map(|ty| !matches!(ty, Type::String))
-                                    .unwrap_or(true);  // default to true if type unknown
+                                // When type is unknown, only enter array block for array-only methods
+                                // (push, pop, etc.), NOT for methods shared with strings (indexOf,
+                                // includes, split) — those are handled by the general dispatch which
+                                // checks is_string at codegen time.
+                                let type_info = ctx.lookup_local_type(&arr_name);
+                                let is_known_string = type_info.map(|ty| matches!(ty, Type::String)).unwrap_or(false);
+                                let is_known_not_string = type_info.map(|ty| !matches!(ty, Type::String | Type::Any | Type::Unknown)).unwrap_or(false);
+                                let is_ambiguous_method = matches!(method_name,
+                                    "indexOf" | "includes" | "slice"
+                                );
+                                let is_not_string = if is_known_string {
+                                    false  // definitely a string, skip array block
+                                } else if is_known_not_string {
+                                    true   // definitely not a string, enter array block
+                                } else if is_ambiguous_method {
+                                    false  // type unknown + ambiguous method, skip array block (fall through to general dispatch)
+                                } else {
+                                    true   // type unknown + array-only method (push, pop, etc.), enter array block
+                                };
                                 if is_not_string {
                                 if let Some(array_id) = ctx.lookup_local(&arr_name) {
                                     match method_name {
@@ -7646,7 +7663,7 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
         Expr::Number(_) | Expr::Integer(_) | Expr::String(_) | Expr::Bool(_) | Expr::Null |
         Expr::Undefined | Expr::BigInt(_) | Expr::This | Expr::FuncRef(_) |
         Expr::ClassRef(_) | Expr::ExternFuncRef { .. } | Expr::EnumMember { .. } |
-        Expr::EnvGet(_) | Expr::ProcessUptime | Expr::ProcessCwd | Expr::NativeModuleRef(_) |
+        Expr::EnvGet(_) | Expr::ProcessUptime | Expr::ProcessCwd | Expr::ProcessMemoryUsage | Expr::NativeModuleRef(_) |
         Expr::RegExp { .. } => {}
         Expr::ObjectKeys(obj) | Expr::ObjectValues(obj) | Expr::ObjectEntries(obj) => {
             collect_local_refs_expr(obj, refs);
@@ -8341,7 +8358,7 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
         Expr::Number(_) | Expr::Integer(_) | Expr::Bool(_) | Expr::String(_) | Expr::BigInt(_) |
         Expr::Object(_) | Expr::TypeOf(_) | Expr::InstanceOf { .. } |
         Expr::EnumMember { .. } | Expr::This | Expr::Null | Expr::Undefined |
-        Expr::EnvGet(_) | Expr::ProcessUptime | Expr::ProcessCwd | Expr::NativeModuleRef(_) |
+        Expr::EnvGet(_) | Expr::ProcessUptime | Expr::ProcessCwd | Expr::ProcessMemoryUsage | Expr::NativeModuleRef(_) |
         Expr::RegExp { .. } => {}
         Expr::ObjectKeys(obj) | Expr::ObjectValues(obj) | Expr::ObjectEntries(obj) => {
             collect_assigned_locals_expr(obj, assigned);

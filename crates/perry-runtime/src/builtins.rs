@@ -238,6 +238,13 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
 
     let jsval = JSValue::from_bits(value.to_bits());
 
+    // Debug: check what type we're detecting
+    let bits = value.to_bits();
+    if bits > 0x7FF0_0000_0000_0000 && (bits >> 48) != 0x7FF8 {
+        eprintln!("[DEBUG format_jsvalue] bits=0x{:016X} is_string={} is_pointer={} is_undefined={} is_null={}",
+            bits, jsval.is_string(), jsval.is_pointer(), jsval.is_undefined(), jsval.is_null());
+    }
+
     unsafe {
         if jsval.is_undefined() {
             "undefined".to_string()
@@ -556,9 +563,12 @@ pub extern "C" fn js_console_log_spread(arr_ptr: *const crate::array::ArrayHeade
         let length = (*arr_ptr).length as usize;
         let data_ptr = (arr_ptr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
 
+        eprintln!("[DEBUG js_console_log_spread] array length={}", length);
         let mut parts: Vec<String> = Vec::with_capacity(length);
         for i in 0..length {
             let value = *data_ptr.add(i);
+            let bits = value.to_bits();
+            eprintln!("[DEBUG spread] i={} bits=0x{:016X}", i, bits);
             parts.push(format_jsvalue(value, 0));
         }
         println!("{}", parts.join(" "));
@@ -696,8 +706,19 @@ pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
         // String pointer (uses STRING_TAG)
         "string"
     } else if jsval.is_pointer() {
-        // Object/array pointer
-        "object"
+        // Object/array/closure pointer - check if it's a closure
+        let ptr = jsval.as_pointer::<u8>();
+        if !ptr.is_null() {
+            // ClosureHeader has type_tag at offset 12 (after func_ptr:8 + capture_count:4)
+            let type_tag = unsafe { *(ptr.add(12) as *const u32) };
+            if type_tag == crate::closure::CLOSURE_MAGIC {
+                "function"
+            } else {
+                "object"
+            }
+        } else {
+            "object"
+        }
     } else if jsval.is_int32() {
         "number"
     } else {

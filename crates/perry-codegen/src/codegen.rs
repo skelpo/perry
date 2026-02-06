@@ -2101,17 +2101,19 @@ impl Compiler {
                 let is_union = matches!(param.ty, perry_types::Type::Any | perry_types::Type::Union(_) | perry_types::Type::Unknown);
                 let is_pointer = is_closure || is_string || is_array ||
                     matches!(param.ty, perry_types::Type::Object(_) | perry_types::Type::Named(_) | perry_types::Type::Promise(_));
-                // Declare variable with correct type (I64 for pointers without union, F64 otherwise)
-                let var_type = if is_pointer && !is_union { types::I64 } else { types::F64 };
-                builder.declare_var(var, var_type);
+                // Constructor params come in as NaN-boxed F64 values (from the signature)
+                // Always use F64 for variable type - is_pointer flag is for extraction, not storage
+                builder.declare_var(var, types::F64);
                 let val = builder.block_params(entry_block)[i + 1]; // +1 to skip 'this'
                 builder.def_var(var, val);
+                // Constructor params are NaN-boxed F64, so is_pointer is false (not raw I64)
+                // The is_array/is_string/is_closure flags indicate the type for proper extraction
                 locals.insert(param.id, LocalInfo {
                     var,
                     name: Some(param.name.clone()),
                     class_name: None,
                     type_args: Vec::new(),
-                    is_pointer: is_pointer && !is_union,
+                    is_pointer: false,  // NaN-boxed F64, not raw I64 pointer
                     is_array,
                     is_string,
                     is_bigint: false,
@@ -5371,6 +5373,14 @@ impl Compiler {
             sig.returns.push(AbiParam::new(types::I64));
             let func_id = self.module.declare_function("js_process_argv", Linkage::Import, &sig)?;
             self.extern_funcs.insert("js_process_argv".to_string(), func_id);
+        }
+
+        // js_process_memory_usage() -> f64 (NaN-boxed object pointer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_process_memory_usage", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_process_memory_usage".to_string(), func_id);
         }
 
         // js_os_type() -> i64 (string ptr)
@@ -9949,7 +9959,7 @@ impl Compiler {
             Expr::Update { .. } | Expr::FuncRef(_) | Expr::ExternFuncRef { .. } |
             Expr::NativeModuleRef(_) | Expr::StaticFieldGet { .. } | Expr::This |
             Expr::EnumMember { .. } | Expr::ClassRef(_) | Expr::EnvGet(_) |
-            Expr::ProcessUptime | Expr::ProcessCwd | Expr::ProcessArgv |
+            Expr::ProcessUptime | Expr::ProcessCwd | Expr::ProcessArgv | Expr::ProcessMemoryUsage |
             Expr::MathRandom | Expr::CryptoRandomUUID |
             Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsHomedir |
             Expr::OsTmpdir | Expr::OsTotalmem | Expr::OsFreemem | Expr::OsUptime |
@@ -15190,6 +15200,13 @@ fn compile_expr(
             let call = builder.ins().call(func_ref, &[]);
             let result_ptr = builder.inst_results(call)[0];
             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+        }
+        Expr::ProcessMemoryUsage => {
+            let func = extern_funcs.get("js_process_memory_usage")
+                .ok_or_else(|| anyhow!("js_process_memory_usage not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            Ok(builder.inst_results(call)[0])
         }
         Expr::OsType => {
             let func = extern_funcs.get("js_os_type")

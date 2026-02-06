@@ -1014,6 +1014,7 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
         // Environment
         Expr::EnvGet(name) => Expr::EnvGet(name.clone()),
         Expr::ProcessUptime => Expr::ProcessUptime,
+        Expr::ProcessMemoryUsage => Expr::ProcessMemoryUsage,
 
         // File system
         Expr::FsReadFileSync(path) => Expr::FsReadFileSync(Box::new(substitute_expr(path, substitutions))),
