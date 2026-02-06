@@ -3543,6 +3543,21 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                 }
                             }
 
+                            // Check for String.methodName() static calls
+                            if obj_ident.sym.as_ref() == "String" {
+                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                    let method_name = method_ident.sym.as_ref();
+                                    match method_name {
+                                        "fromCharCode" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::StringFromCharCode(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        _ => {} // Fall through to generic handling
+                                    }
+                                }
+                            }
+
                             // Check for crypto.methodName() calls (including require('crypto') aliases)
                             let is_crypto_module = obj_name == "crypto" ||
                                 ctx.lookup_builtin_module_alias(obj_name) == Some("crypto");
@@ -7406,6 +7421,9 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
             collect_local_refs_expr(string, refs);
             collect_local_refs_expr(delimiter, refs);
         }
+        Expr::StringFromCharCode(code) => {
+            collect_local_refs_expr(code, refs);
+        }
         // Map operations
         Expr::MapNew => {}
         Expr::MapSet { map, key, value } => {
@@ -8095,6 +8113,9 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
         Expr::StringSplit(string, delimiter) => {
             collect_assigned_locals_expr(string, assigned);
             collect_assigned_locals_expr(delimiter, assigned);
+        }
+        Expr::StringFromCharCode(code) => {
+            collect_assigned_locals_expr(code, assigned);
         }
         // Map operations
         Expr::MapNew => {}

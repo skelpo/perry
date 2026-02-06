@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.108
+**Current Version:** 0.2.109
 
 ## Workflow Requirements
 
@@ -238,6 +238,22 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.95)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.109
+- Fix string concatenation in unrolled loops producing wrong results
+  - Root cause: The loop unrolling "generic accumulator" optimization (Pattern 3: `x = x + f(i)`)
+    was incorrectly matching string concatenation patterns like `str = str + 'A'`
+  - This optimization creates 8 separate f64 accumulator variables and sums them at the end,
+    which is designed for numeric accumulation but completely breaks string concatenation
+  - String variables would get their `info.var` redirected to different accumulators on each
+    unrolled iteration, causing the string append optimization to write to wrong variables
+  - Test case: `for (let i = 0; i < 10; i++) { str = str + 'A' }` produced "AA" instead of "AAAAAAAAAA"
+  - Fix: Added check in Pattern 3 detection to skip when the target variable is a string
+    (`is_string_var = locals.get(set_id).map(|i| i.is_string).unwrap_or(false)`)
+- Also added `String.fromCharCode` support:
+  - Added `StringFromCharCode(Box<Expr>)` HIR expression variant
+  - Added `js_string_from_char_code` runtime function for single character creation
+  - Added `StringFromCharCode` to `is_string_expr` for proper string type inference
 
 ### v0.2.108
 - Fix function inlining not substituting LocalIds in Object literals and JSON operations

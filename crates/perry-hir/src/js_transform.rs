@@ -678,6 +678,9 @@ fn transform_expr(
             transform_expr(a, js_imports, extern_func_to_js, local_name_to_js, tracker);
             transform_expr(b, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
+        Expr::StringFromCharCode(code) => {
+            transform_expr(code, js_imports, extern_func_to_js, local_name_to_js, tracker);
+        }
         // Map/Set methods
         Expr::MapSet { map, key, value } => {
             transform_expr(map, js_imports, extern_func_to_js, local_name_to_js, tracker);

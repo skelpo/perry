@@ -841,6 +841,7 @@ pub enum Expr {
 
     // String methods
     StringSplit(Box<Expr>, Box<Expr>),  // string.split(delimiter) -> string[]
+    StringFromCharCode(Box<Expr>),      // String.fromCharCode(code) -> single-char string
 
     // Map operations
     MapNew,                                                    // new Map() -> empty map

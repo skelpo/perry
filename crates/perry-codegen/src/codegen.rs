@@ -3636,6 +3636,19 @@ impl Compiler {
             self.extern_funcs.insert("js_string_split".to_string(), func_id);
         }
 
+        // js_string_from_char_code(code: i32) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I32)); // character code
+            sig.returns.push(AbiParam::new(types::I64)); // string pointer
+            let func_id = self.module.declare_function(
+                "js_string_from_char_code",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_string_from_char_code".to_string(), func_id);
+        }
+
         // js_string_starts_with(s: *const StringHeader, prefix: *const StringHeader) -> i32
         {
             let mut sig = self.module.make_signature();
@@ -9699,6 +9712,9 @@ impl Compiler {
                 self.collect_closures_from_expr(string, closures, enclosing_class);
                 self.collect_closures_from_expr(delimiter, closures, enclosing_class);
             }
+            Expr::StringFromCharCode(code) => {
+                self.collect_closures_from_expr(code, closures, enclosing_class);
+            }
             Expr::RegExpTest { regex, string } => {
                 self.collect_closures_from_expr(regex, closures, enclosing_class);
                 self.collect_closures_from_expr(string, closures, enclosing_class);
@@ -11233,6 +11249,7 @@ fn compile_async_stmt(
             fn is_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
+                    Expr::StringFromCharCode(_) => true,  // String.fromCharCode() returns a string
                     Expr::ArrayJoin { .. } => true,  // array.join() returns a string
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -11442,6 +11459,7 @@ fn compile_stmt(
             fn is_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
+                    Expr::StringFromCharCode(_) => true,
                     // EnvGet is NOT included - it returns string OR undefined (handled as union)
                     Expr::FsReadFileSync(_) => true, // fs.readFileSync returns a string
                     // All path operations return strings
@@ -13126,9 +13144,11 @@ fn compile_stmt(
                                         }
 
                                         // Pattern 3: x = x + f(i) where f(i) doesn't reference x
-                                        // This is a generic accumulation pattern
+                                        // This is a generic accumulation pattern for NUMERIC values only
+                                        // Skip for string variables - string concat has different semantics
                                         if use_strength_reduction.is_none() && use_multi_accum.is_none() {
-                                            if !expr_references_local(right, *set_id) {
+                                            let is_string_var = locals.get(set_id).map(|i| i.is_string).unwrap_or(false);
+                                            if !is_string_var && !expr_references_local(right, *set_id) {
                                                 use_generic_accum = Some(*set_id);
                                             }
                                         }
@@ -14988,6 +15008,32 @@ fn compile_expr(
             let func_ref = module.declare_func_in_func(*func, builder.func);
             let call = builder.ins().call(func_ref, &[]);
             Ok(builder.inst_results(call)[0])
+        }
+        // String static methods
+        Expr::StringFromCharCode(code_expr) => {
+            // Compile the character code argument
+            let code_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, code_expr, this_ctx)?;
+            // Convert to i32 (character code)
+            let code_val_type = builder.func.dfg.value_type(code_val);
+            let code_i32 = if code_val_type == types::F64 {
+                builder.ins().fcvt_to_sint(types::I32, code_val)
+            } else if code_val_type == types::I64 {
+                builder.ins().ireduce(types::I32, code_val)
+            } else {
+                code_val
+            };
+            // Call js_string_from_char_code runtime function
+            let func = extern_funcs.get("js_string_from_char_code")
+                .ok_or_else(|| anyhow!("js_string_from_char_code not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[code_i32]);
+            let result_ptr = builder.inst_results(call)[0];
+            // NaN-box the string pointer with STRING_TAG
+            let nanbox_func = extern_funcs.get("js_nanbox_string")
+                .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+            let nanbox_func_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+            let nanbox_call = builder.ins().call(nanbox_func_ref, &[result_ptr]);
+            Ok(builder.inst_results(nanbox_call)[0])
         }
         // Crypto operations
         Expr::CryptoRandomBytes(size_expr) => {
@@ -17446,6 +17492,7 @@ fn compile_expr(
                             fn is_string_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                                 match expr {
                                     Expr::String(_) => true,
+                                    Expr::StringFromCharCode(_) => true,
                                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                                     Expr::Binary { op: BinaryOp::Add, left, right } => {
                                         is_string_operand(left, locals) || is_string_operand(right, locals)
@@ -17454,16 +17501,23 @@ fn compile_expr(
                                 }
                             }
 
-                            // Get the current string pointer (stored as f64, need to bitcast to I64)
+                            // Get the current string pointer (stored as NaN-boxed f64 with STRING_TAG)
                             let dest_f64 = builder.use_var(info.var);
-                            let dest_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), dest_f64);
+                            // Extract raw pointer from NaN-boxed string
+                            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                            let dest_call = builder.ins().call(get_str_ptr_ref, &[dest_f64]);
+                            let dest_ptr = builder.inst_results(dest_call)[0];
 
                             // Compile the right side
                             let rhs_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
 
                             // Convert to string pointer if needed
                             let rhs_ptr = if is_string_operand(right, locals) {
-                                builder.ins().bitcast(types::I64, MemFlags::new(), rhs_val)
+                                // String operand - extract raw pointer from NaN-boxed value
+                                let rhs_call = builder.ins().call(get_str_ptr_ref, &[rhs_val]);
+                                builder.inst_results(rhs_call)[0]
                             } else {
                                 // Number to string
                                 let num_to_str_func = extern_funcs.get("js_number_to_string")
@@ -17480,8 +17534,12 @@ fn compile_expr(
                             let call = builder.ins().call(func_ref, &[dest_ptr, rhs_ptr]);
                             let new_ptr = builder.inst_results(call)[0];
 
-                            // Convert back to f64 for storage (strings are stored as f64-bitcast pointers)
-                            let new_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), new_ptr);
+                            // NaN-box the new pointer with STRING_TAG for storage
+                            let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                            let nanbox_call = builder.ins().call(nanbox_ref, &[new_ptr]);
+                            let new_f64 = builder.inst_results(nanbox_call)[0];
 
                             // Update the variable with the (possibly new) pointer
                             builder.def_var(info.var, new_f64);
@@ -17646,6 +17704,7 @@ fn compile_expr(
             fn is_string_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
+                    Expr::StringFromCharCode(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string && !i.is_union).unwrap_or(false),
                     Expr::FsReadFileSync(_) |
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
@@ -17770,8 +17829,13 @@ fn compile_expr(
                             _ => false,
                         };
                         if might_be_string_ptr {
-                            // Assume it's a string pointer stored as f64 - just bitcast back to i64
-                            ensure_i64(builder, lhs_val)
+                            // String stored as NaN-boxed f64 - extract the raw pointer
+                            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                            let val_f64 = ensure_f64(builder, lhs_val);
+                            let call = builder.ins().call(get_str_ptr_ref, &[val_f64]);
+                            builder.inst_results(call)[0]
                         } else {
                             // Unknown f64 - could be NaN-boxed string or number
                             // Use js_jsvalue_to_string which handles both cases
@@ -17834,8 +17898,13 @@ fn compile_expr(
                             _ => false,
                         };
                         if might_be_string_ptr {
-                            // Assume it's a string pointer stored as f64 - just bitcast back to i64
-                            ensure_i64(builder, rhs_val)
+                            // String stored as NaN-boxed f64 - extract the raw pointer
+                            let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                            let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                            let val_f64 = ensure_f64(builder, rhs_val);
+                            let call = builder.ins().call(get_str_ptr_ref, &[val_f64]);
+                            builder.inst_results(call)[0]
                         } else {
                             // Unknown f64 - could be NaN-boxed string or number
                             // Use js_jsvalue_to_string which handles both cases
@@ -17855,7 +17924,12 @@ fn compile_expr(
                 let call = builder.ins().call(func_ref, &[lhs_ptr, rhs_ptr]);
                 let result_ptr = builder.inst_results(call)[0];
 
-                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
+                // NaN-box the result with STRING_TAG
+                let nanbox_func = extern_funcs.get("js_nanbox_string")
+                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                return Ok(builder.inst_results(nanbox_call)[0]);
             }
 
             // Check if this is BigInt arithmetic

@@ -1104,6 +1104,9 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
             Box::new(substitute_expr(string, substitutions)),
             Box::new(substitute_expr(delimiter, substitutions)),
         ),
+        Expr::StringFromCharCode(code) => Expr::StringFromCharCode(
+            Box::new(substitute_expr(code, substitutions)),
+        ),
 
         // Map operations
         Expr::MapNew => Expr::MapNew,
@@ -1808,6 +1811,9 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
             collect_instantiations_in_expr(string, ctx, module);
             collect_instantiations_in_expr(delimiter, ctx, module);
         }
+        Expr::StringFromCharCode(code) => {
+            collect_instantiations_in_expr(code, ctx, module);
+        }
         Expr::MapNew => {}
         Expr::MapSet { map, key, value } => {
             collect_instantiations_in_expr(map, ctx, module);
@@ -2209,6 +2215,9 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
         Expr::StringSplit(string, delimiter) => {
             update_call_sites_in_expr(string, ctx, lookup);
             update_call_sites_in_expr(delimiter, ctx, lookup);
+        }
+        Expr::StringFromCharCode(code) => {
+            update_call_sites_in_expr(code, ctx, lookup);
         }
         Expr::MapNew => {}
         Expr::MapSet { map, key, value } => {

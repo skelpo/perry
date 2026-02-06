@@ -453,6 +453,28 @@ pub extern "C" fn js_string_char_at(s: *const StringHeader, index: i32) -> *mut 
     }
 }
 
+/// Create a string from a character code (String.fromCharCode)
+/// Takes a single character code and returns a 1-character string
+#[no_mangle]
+pub extern "C" fn js_string_from_char_code(code: i32) -> *mut StringHeader {
+    if code < 0 || code > 0xFFFF {
+        // Invalid character code, return empty string
+        return js_string_from_bytes(std::ptr::null(), 0);
+    }
+
+    // For ASCII characters, create a simple 1-byte string
+    if code < 128 {
+        let byte = code as u8;
+        return js_string_from_bytes(&byte as *const u8, 1);
+    }
+
+    // For non-ASCII, encode as UTF-8
+    let ch = char::from_u32(code as u32).unwrap_or('\u{FFFD}');
+    let mut buf = [0u8; 4];
+    let encoded = ch.encode_utf8(&mut buf);
+    js_string_from_bytes(encoded.as_ptr(), encoded.len() as u32)
+}
+
 /// Print a string to stdout
 #[no_mangle]
 pub extern "C" fn js_string_print(s: *const StringHeader) {
