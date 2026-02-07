@@ -1052,12 +1052,13 @@ fn lower_module_decl(
 
                             // Track exported values that need cross-module access
                             // Include: object literals, call expressions (e.g., Router()), array literals,
-                            // and new expressions (e.g., new Router())
+                            // new expressions (e.g., new Router()), and arrow functions (e.g., () => {})
                             let needs_export_global = matches!(init.as_ref(),
                                 ast::Expr::Object(_) |
                                 ast::Expr::Call(_) |
                                 ast::Expr::Array(_) |
-                                ast::Expr::New(_)
+                                ast::Expr::New(_) |
+                                ast::Expr::Arrow(_)
                             );
 
                             let expr = lower_expr(ctx, init)?;
@@ -1147,7 +1148,7 @@ fn lower_module_decl(
                     }
                 }
             } else {
-                // Local export
+                // Local export: export { foo, bar as baz }
                 for spec in &export_named.specifiers {
                     if let ast::ExportSpecifier::Named(named) = spec {
                         let local = match &named.orig {
@@ -1161,7 +1162,13 @@ fn lower_module_decl(
                                 ast::ModuleExportName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
                             })
                             .unwrap_or_else(|| local.clone());
-                        module.exports.push(Export::Named { local, exported });
+                        module.exports.push(Export::Named { local: local.clone(), exported: exported.clone() });
+
+                        // If the local name refers to a function, add it to exported_functions
+                        // so that a wrapper function is generated for cross-module calls
+                        if let Some(func_id) = ctx.lookup_func(&local) {
+                            module.exported_functions.push((exported, func_id));
+                        }
                     }
                 }
             }

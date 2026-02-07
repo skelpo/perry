@@ -105,6 +105,8 @@ struct LocalInfo {
     /// CSE: cached products with other variables (var * other_var)
     /// Maps other_var_id -> cache_variable for x*y patterns
     product_cache: Option<HashMap<LocalId, Variable>>,
+    /// Cached raw I64 pointer for arrays (avoids redundant js_nanbox_get_pointer calls in loops)
+    cached_array_ptr: Option<Variable>,
 }
 
 /// Check if a block has been filled with a terminating instruction
@@ -708,6 +710,7 @@ impl Compiler {
                     scalar_fields: None,
                     squared_cache: None,
                     product_cache: None,
+                    cached_array_ptr: None,
                 };
                 self.module_level_locals.insert(*id, info);
                 }
@@ -1006,6 +1009,21 @@ impl Compiler {
             self.compile_function(func)?;
         }
 
+        // Generate wrapper functions for all exported functions
+        // This is necessary because cross-module calls use __wrapper_functionName for uniform ABI
+        for (_func_name, func_id) in &hir.exported_functions {
+            // This will create the wrapper if it doesn't exist
+            if let Err(e) = self.get_or_create_func_wrapper(*func_id) {
+                // Log but don't fail - some functions may not have been compiled yet
+                log::debug!("Could not create wrapper for exported function {}: {}", _func_name, e);
+            }
+        }
+
+        // Generate wrapper functions for exported closures (export const fn = () => {})
+        // These are stored in exported_objects, not exported_functions, but callers expect
+        // __wrapper_functionName to exist for uniform cross-module calling
+        self.generate_exported_closure_wrappers(&hir.init, &hir.exported_objects)?;
+
         // Compile init statements as main (entry) or module init function (non-entry)
         // For non-entry modules, always generate the init function even if empty,
         // because the entry module will call it.
@@ -1287,7 +1305,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None,
                 });
             }
 
@@ -1321,7 +1339,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None,
                     })
                 };
 
@@ -1575,7 +1593,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -1720,7 +1738,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None,
                 });
             }
 
@@ -1741,7 +1759,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -1910,7 +1928,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None,
                 });
             }
 
@@ -1931,7 +1949,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -2128,7 +2146,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None,
                 });
             }
 
@@ -2149,7 +2167,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -9061,11 +9079,77 @@ impl Compiler {
         Ok(())
     }
 
+    /// Check if a function body is fully integer-compatible (no strings, objects, floats, etc.)
+    /// This enables generating an i64 specialization for better performance
+    fn is_integer_only_function(func: &Function) -> bool {
+        // All params must be Number type and return type must be Number
+        if !func.params.iter().all(|p| matches!(p.ty, perry_types::Type::Number | perry_types::Type::Any)) {
+            return false;
+        }
+        if !matches!(func.return_type, perry_types::Type::Number | perry_types::Type::Any) {
+            return false;
+        }
+        // Must not be async
+        if func.is_async { return false; }
+        // Body must only contain integer-compatible operations
+        fn is_integer_expr(expr: &Expr, func_id: u32) -> bool {
+            match expr {
+                Expr::Integer(_) => true,
+                Expr::Number(f) => f.fract() == 0.0,
+                Expr::LocalGet(_) => true,
+                Expr::Binary { op, left, right } => {
+                    matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Mod |
+                             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor |
+                             BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr) &&
+                    is_integer_expr(left, func_id) && is_integer_expr(right, func_id)
+                }
+                Expr::Compare { left, right, .. } => {
+                    is_integer_expr(left, func_id) && is_integer_expr(right, func_id)
+                }
+                Expr::Unary { op, operand } => {
+                    matches!(op, UnaryOp::Neg | UnaryOp::BitNot) && is_integer_expr(operand, func_id)
+                }
+                Expr::Conditional { condition, then_expr, else_expr } => {
+                    is_integer_expr(condition, func_id) && is_integer_expr(then_expr, func_id) && is_integer_expr(else_expr, func_id)
+                }
+                Expr::Call { callee, args, .. } => {
+                    // Only allow self-recursive calls
+                    if let Expr::FuncRef(id) = callee.as_ref() {
+                        *id == func_id && args.iter().all(|a| is_integer_expr(a, func_id))
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            }
+        }
+        fn is_integer_stmt(stmt: &Stmt, func_id: u32) -> bool {
+            match stmt {
+                Stmt::Return(Some(expr)) => is_integer_expr(expr, func_id),
+                Stmt::Return(None) => true,
+                Stmt::Expr(expr) => is_integer_expr(expr, func_id),
+                Stmt::If { condition, then_branch, else_branch } => {
+                    is_integer_expr(condition, func_id) &&
+                    then_branch.iter().all(|s| is_integer_stmt(s, func_id)) &&
+                    else_branch.as_ref().map(|eb| eb.iter().all(|s| is_integer_stmt(s, func_id))).unwrap_or(true)
+                }
+                Stmt::Let { init: Some(expr), .. } => is_integer_expr(expr, func_id),
+                Stmt::Let { init: None, .. } => true,
+                _ => false,
+            }
+        }
+        func.body.iter().all(|s| is_integer_stmt(s, func.id))
+    }
+
     fn compile_function(&mut self, func: &Function) -> Result<()> {
         // Track current function for self-recursive call optimization
         CURRENT_FUNC_HIR_ID.with(|c| c.set(Some(func.id)));
 
-        let result = self.compile_function_inner(func);
+        let result = if Self::is_integer_only_function(func) && func.params.len() <= 4 {
+            self.compile_integer_specialized_function(func)
+        } else {
+            self.compile_function_inner(func)
+        };
 
         CURRENT_FUNC_HIR_ID.with(|c| c.set(None));
         result
@@ -9155,7 +9239,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None,
                 });
             }
 
@@ -9191,7 +9275,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None,
                     })
                 };
 
@@ -9295,6 +9379,284 @@ impl Compiler {
         self.module.clear_context(&mut self.ctx);
 
         Ok(())
+    }
+
+    /// Compile an integer-only function with i64 specialization for better performance.
+    /// Creates a `{name}_i64` inner function using integer instructions (icmp/iadd/isub)
+    /// and makes the original function a thin wrapper that converts f64 <-> i64.
+    fn compile_integer_specialized_function(&mut self, func: &Function) -> Result<()> {
+        let orig_func_id = *self.func_ids.get(&func.id)
+            .ok_or_else(|| anyhow!("Function not declared: {}", func.name))?;
+
+        // Step 1: Declare the i64 specialized function
+        let i64_name = format!("{}_i64", func.name);
+        let mut i64_sig = self.module.make_signature();
+        for _ in &func.params {
+            i64_sig.params.push(AbiParam::new(types::I64));
+        }
+        i64_sig.returns.push(AbiParam::new(types::I64));
+        let i64_func_id = self.module.declare_function(&i64_name, Linkage::Local, &i64_sig)?;
+
+        // Step 2: Compile the i64 specialized function body
+        self.ctx.func.signature = i64_sig.clone();
+        {
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+            let entry_block = builder.create_block();
+            builder.append_block_params_for_function_params(entry_block);
+            builder.switch_to_block(entry_block);
+            builder.seal_block(entry_block);
+
+            // Create i64 variables for parameters
+            let mut param_vars: HashMap<LocalId, Variable> = HashMap::new();
+            for (i, param) in func.params.iter().enumerate() {
+                let var = Variable::new(i);
+                builder.declare_var(var, types::I64);
+                let val = builder.block_params(entry_block)[i];
+                builder.def_var(var, val);
+                param_vars.insert(param.id, var);
+            }
+
+            let i64_func_ref = self.module.declare_func_in_func(i64_func_id, builder.func);
+            let mut next_var = func.params.len();
+
+            // Compile function body with integer operations
+            Self::compile_i64_body(&mut builder, &func.body, &mut param_vars, &mut next_var, i64_func_ref, func.id);
+
+            // Fallback return 0 if body doesn't explicitly return
+            let current_block = builder.current_block().unwrap();
+            if !is_block_filled(&builder, current_block) {
+                let zero = builder.ins().iconst(types::I64, 0);
+                builder.ins().return_(&[zero]);
+            }
+
+            builder.finalize();
+        }
+
+        if let Err(e) = self.module.define_function(i64_func_id, &mut self.ctx) {
+            eprintln!("=== VERIFIER ERROR in i64-specialized function '{}' ===", i64_name);
+            eprintln!("Error: {}", e);
+            return Err(anyhow!("Error compiling i64-specialized function '{}': {}", i64_name, e));
+        }
+        self.module.clear_context(&mut self.ctx);
+
+        // Step 3: Compile the original function as a thin wrapper: f64 -> i64 -> call -> i64 -> f64
+        self.ctx.func.signature.params.clear();
+        self.ctx.func.signature.returns.clear();
+        for _ in &func.params {
+            self.ctx.func.signature.params.push(AbiParam::new(types::F64));
+        }
+        self.ctx.func.signature.returns.push(AbiParam::new(types::F64));
+
+        {
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+            let entry_block = builder.create_block();
+            builder.append_block_params_for_function_params(entry_block);
+            builder.switch_to_block(entry_block);
+            builder.seal_block(entry_block);
+
+            let i64_func_ref = self.module.declare_func_in_func(i64_func_id, builder.func);
+
+            // Convert f64 params to i64 via fcvt_to_sint
+            let mut i64_args = Vec::new();
+            for i in 0..func.params.len() {
+                let f64_val = builder.block_params(entry_block)[i];
+                let i64_val = builder.ins().fcvt_to_sint(types::I64, f64_val);
+                i64_args.push(i64_val);
+            }
+
+            // Call the i64 specialized function
+            let call = builder.ins().call(i64_func_ref, &i64_args);
+            let i64_result = builder.inst_results(call)[0];
+
+            // Convert i64 result back to f64
+            let f64_result = builder.ins().fcvt_from_sint(types::F64, i64_result);
+            builder.ins().return_(&[f64_result]);
+
+            builder.finalize();
+        }
+
+        if let Err(e) = self.module.define_function(orig_func_id, &mut self.ctx) {
+            eprintln!("=== VERIFIER ERROR in wrapper for '{}' ===", func.name);
+            eprintln!("Error: {}", e);
+            return Err(anyhow!("Error compiling wrapper for '{}': {}", func.name, e));
+        }
+        self.module.clear_context(&mut self.ctx);
+
+        Ok(())
+    }
+
+    /// Compile a statement list for the i64-specialized function body
+    fn compile_i64_body(
+        builder: &mut FunctionBuilder,
+        stmts: &[Stmt],
+        vars: &mut HashMap<LocalId, Variable>,
+        next_var: &mut usize,
+        self_func_ref: cranelift_codegen::ir::FuncRef,
+        func_hir_id: u32,
+    ) {
+        for stmt in stmts {
+            Self::compile_i64_stmt(builder, stmt, vars, next_var, self_func_ref, func_hir_id);
+            // Stop if block is terminated (e.g. by a return)
+            if let Some(block) = builder.current_block() {
+                if is_block_filled(builder, block) {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Compile a single statement in the i64-specialized function
+    fn compile_i64_stmt(
+        builder: &mut FunctionBuilder,
+        stmt: &Stmt,
+        vars: &mut HashMap<LocalId, Variable>,
+        next_var: &mut usize,
+        self_func_ref: cranelift_codegen::ir::FuncRef,
+        func_hir_id: u32,
+    ) {
+        match stmt {
+            Stmt::Return(Some(expr)) => {
+                let val = Self::compile_i64_expr(builder, expr, vars, next_var, self_func_ref, func_hir_id);
+                builder.ins().return_(&[val]);
+            }
+            Stmt::Return(None) => {
+                let zero = builder.ins().iconst(types::I64, 0);
+                builder.ins().return_(&[zero]);
+            }
+            Stmt::Expr(expr) => {
+                Self::compile_i64_expr(builder, expr, vars, next_var, self_func_ref, func_hir_id);
+            }
+            Stmt::Let { id, init, .. } => {
+                let var = Variable::new(*next_var);
+                *next_var += 1;
+                builder.declare_var(var, types::I64);
+                let val = if let Some(init_expr) = init {
+                    Self::compile_i64_expr(builder, init_expr, vars, next_var, self_func_ref, func_hir_id)
+                } else {
+                    builder.ins().iconst(types::I64, 0)
+                };
+                builder.def_var(var, val);
+                vars.insert(*id, var);
+            }
+            Stmt::If { condition, then_branch, else_branch } => {
+                let cond_val = Self::compile_i64_expr(builder, condition, vars, next_var, self_func_ref, func_hir_id);
+                let then_block = builder.create_block();
+                let else_block = builder.create_block();
+                let merge_block = builder.create_block();
+
+                builder.ins().brif(cond_val, then_block, &[], else_block, &[]);
+
+                // Then branch
+                builder.switch_to_block(then_block);
+                builder.seal_block(then_block);
+                Self::compile_i64_body(builder, then_branch, vars, next_var, self_func_ref, func_hir_id);
+                if let Some(block) = builder.current_block() {
+                    if !is_block_filled(builder, block) {
+                        builder.ins().jump(merge_block, &[]);
+                    }
+                }
+
+                // Else branch
+                builder.switch_to_block(else_block);
+                builder.seal_block(else_block);
+                if let Some(else_stmts) = else_branch {
+                    Self::compile_i64_body(builder, else_stmts, vars, next_var, self_func_ref, func_hir_id);
+                }
+                if let Some(block) = builder.current_block() {
+                    if !is_block_filled(builder, block) {
+                        builder.ins().jump(merge_block, &[]);
+                    }
+                }
+
+                builder.switch_to_block(merge_block);
+                builder.seal_block(merge_block);
+            }
+            _ => {} // Other statements not supported in integer-only functions
+        }
+    }
+
+    /// Compile an expression in the i64-specialized function, returning an i64 Value
+    fn compile_i64_expr(
+        builder: &mut FunctionBuilder,
+        expr: &Expr,
+        vars: &mut HashMap<LocalId, Variable>,
+        next_var: &mut usize,
+        self_func_ref: cranelift_codegen::ir::FuncRef,
+        func_hir_id: u32,
+    ) -> Value {
+        match expr {
+            Expr::Integer(n) => {
+                builder.ins().iconst(types::I64, *n as i64)
+            }
+            Expr::Number(f) => {
+                builder.ins().iconst(types::I64, *f as i64)
+            }
+            Expr::LocalGet(id) => {
+                if let Some(var) = vars.get(id) {
+                    builder.use_var(*var)
+                } else {
+                    builder.ins().iconst(types::I64, 0)
+                }
+            }
+            Expr::Binary { op, left, right } => {
+                let lhs = Self::compile_i64_expr(builder, left, vars, next_var, self_func_ref, func_hir_id);
+                let rhs = Self::compile_i64_expr(builder, right, vars, next_var, self_func_ref, func_hir_id);
+                match op {
+                    BinaryOp::Add => builder.ins().iadd(lhs, rhs),
+                    BinaryOp::Sub => builder.ins().isub(lhs, rhs),
+                    BinaryOp::Mul => builder.ins().imul(lhs, rhs),
+                    BinaryOp::Mod => builder.ins().srem(lhs, rhs),
+                    BinaryOp::BitAnd => builder.ins().band(lhs, rhs),
+                    BinaryOp::BitOr => builder.ins().bor(lhs, rhs),
+                    BinaryOp::BitXor => builder.ins().bxor(lhs, rhs),
+                    BinaryOp::Shl => builder.ins().ishl(lhs, rhs),
+                    BinaryOp::Shr => builder.ins().sshr(lhs, rhs),
+                    BinaryOp::UShr => builder.ins().ushr(lhs, rhs),
+                    _ => builder.ins().iconst(types::I64, 0), // Unsupported
+                }
+            }
+            Expr::Compare { op, left, right } => {
+                let lhs = Self::compile_i64_expr(builder, left, vars, next_var, self_func_ref, func_hir_id);
+                let rhs = Self::compile_i64_expr(builder, right, vars, next_var, self_func_ref, func_hir_id);
+                let cc = match op {
+                    CompareOp::Lt => IntCC::SignedLessThan,
+                    CompareOp::Le => IntCC::SignedLessThanOrEqual,
+                    CompareOp::Gt => IntCC::SignedGreaterThan,
+                    CompareOp::Ge => IntCC::SignedGreaterThanOrEqual,
+                    CompareOp::Eq => IntCC::Equal,
+                    CompareOp::Ne => IntCC::NotEqual,
+                };
+                builder.ins().icmp(cc, lhs, rhs)
+            }
+            Expr::Unary { op, operand } => {
+                let val = Self::compile_i64_expr(builder, operand, vars, next_var, self_func_ref, func_hir_id);
+                match op {
+                    UnaryOp::Neg => builder.ins().ineg(val),
+                    UnaryOp::BitNot => builder.ins().bnot(val),
+                    _ => val,
+                }
+            }
+            Expr::Conditional { condition, then_expr, else_expr } => {
+                let cond = Self::compile_i64_expr(builder, condition, vars, next_var, self_func_ref, func_hir_id);
+                let then_val = Self::compile_i64_expr(builder, then_expr, vars, next_var, self_func_ref, func_hir_id);
+                let else_val = Self::compile_i64_expr(builder, else_expr, vars, next_var, self_func_ref, func_hir_id);
+                builder.ins().select(cond, then_val, else_val)
+            }
+            Expr::Call { callee, args, .. } => {
+                // Only self-recursive calls are allowed
+                if let Expr::FuncRef(id) = callee.as_ref() {
+                    if *id == func_hir_id {
+                        let arg_vals: Vec<Value> = args.iter()
+                            .map(|a| Self::compile_i64_expr(builder, a, vars, next_var, self_func_ref, func_hir_id))
+                            .collect();
+                        let call = builder.ins().call(self_func_ref, &arg_vals);
+                        return builder.inst_results(call)[0];
+                    }
+                }
+                builder.ins().iconst(types::I64, 0)
+            }
+            _ => builder.ins().iconst(types::I64, 0), // Unsupported expression
+        }
     }
 
     /// Check if a function body returns a closure (by scanning return statements)
@@ -10468,7 +10830,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None,
                 });
             }
 
@@ -10542,7 +10904,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None,
                     });
                 } else {
                     // For immutable captures, store the value directly
@@ -10571,7 +10933,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None,
                     });
                 }
             }
@@ -10611,7 +10973,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None,
                     })
                 };
 
@@ -10822,10 +11184,14 @@ impl Compiler {
         let nanbox_get_ptr_id = self.extern_funcs.get("js_nanbox_get_pointer").copied();
 
         // Compile the wrapper function
+        // Use a fresh FunctionBuilderContext to avoid state accumulation from previous compilations
+        // This is important because we generate wrappers after all regular functions are compiled,
+        // and the shared func_ctx may have accumulated state that causes issues.
         self.ctx.func.signature = sig;
+        let mut wrapper_func_ctx = FunctionBuilderContext::new();
 
         {
-            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut wrapper_func_ctx);
 
             let entry_block = builder.create_block();
             builder.append_block_params_for_function_params(entry_block);
@@ -10931,6 +11297,138 @@ impl Compiler {
 
         self.func_wrapper_ids.insert(func_id, wrapper_id);
         Ok(wrapper_id)
+    }
+
+    /// Generate wrapper functions for exported closures
+    ///
+    /// When TypeScript has `export const fn = () => {}`, this is an exported object containing
+    /// a closure, not an exported function. Cross-module calls still expect `__wrapper_fn` to exist.
+    /// This function scans init statements for such patterns and generates wrapper stubs that:
+    /// 1. Load the closure from the `__export_fn` global
+    /// 2. Call the closure with the provided arguments
+    /// 3. Return the result
+    fn generate_exported_closure_wrappers(&mut self, init_stmts: &[Stmt], exported_objects: &[String]) -> Result<()> {
+        use perry_hir::ir::{Stmt, Expr};
+
+        let exported_set: std::collections::HashSet<&String> = exported_objects.iter().collect();
+
+        eprintln!("[CLOSURE WRAPPER] Scanning {} init statements, {} exported objects", init_stmts.len(), exported_objects.len());
+        for name in &exported_set {
+            eprintln!("[CLOSURE WRAPPER]   Exported object: {}", name);
+        }
+
+        // Scan init statements for exported closures
+        for stmt in init_stmts {
+            if let Stmt::Let { name, init: Some(init_expr), .. } = stmt {
+                eprintln!("[CLOSURE WRAPPER] Found Let: {} (in exported_set: {})", name, exported_set.contains(name));
+                if !exported_set.contains(name) {
+                    continue;
+                }
+
+                // Check if the initializer is a Closure
+                let (params, is_async) = match init_expr {
+                    Expr::Closure { params, is_async, .. } => {
+                        eprintln!("[CLOSURE WRAPPER]   {} is a Closure with {} params", name, params.len());
+                        (params.clone(), *is_async)
+                    },
+                    other => {
+                        eprintln!("[CLOSURE WRAPPER]   {} is NOT a Closure, it's {:?}", name, std::mem::discriminant(other));
+                        continue;
+                    }
+                };
+
+                // Generate wrapper for this closure
+                log::debug!("Generating closure wrapper for exported const: {}", name);
+
+                // Build wrapper signature: (closure_ptr, ...args) -> f64
+                let mut sig = self.module.make_signature();
+                sig.params.push(AbiParam::new(types::I64)); // closure_ptr (will be ignored, we load from global)
+                for _ in &params {
+                    sig.params.push(AbiParam::new(types::F64));
+                }
+                sig.returns.push(AbiParam::new(types::F64));
+
+                let wrapper_name = format!("__wrapper_{}", name);
+                let wrapper_id = self.module.declare_function(&wrapper_name, Linkage::Export, &sig)?;
+
+                // Get the data ID for the exported global
+                let export_global_name = format!("__export_{}", name);
+                let data_id = match self.exported_object_ids.get(name) {
+                    Some(id) => *id,
+                    None => {
+                        // If not already declared, declare it now
+                        self.module.declare_data(&export_global_name, Linkage::Local, true, false)?
+                    }
+                };
+
+                // Get closure call function based on param count
+                let call_func_name = match params.len() {
+                    0 => "js_closure_call0",
+                    1 => "js_closure_call1",
+                    2 => "js_closure_call2",
+                    3 => "js_closure_call3",
+                    4 => "js_closure_call4",
+                    5 => "js_closure_call5",
+                    6 => "js_closure_call6",
+                    7 => "js_closure_call7",
+                    8 => "js_closure_call8",
+                    _ => {
+                        log::warn!("Exported closure {} has too many params ({}), skipping wrapper", name, params.len());
+                        continue;
+                    }
+                };
+                let closure_call_id = self.extern_funcs.get(call_func_name)
+                    .copied()
+                    .ok_or_else(|| anyhow!("{} not declared for closure wrapper", call_func_name))?;
+
+                // Compile the wrapper function
+                self.ctx.func.signature = sig.clone();
+                let mut wrapper_func_ctx = FunctionBuilderContext::new();
+
+                {
+                    let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut wrapper_func_ctx);
+
+                    let entry_block = builder.create_block();
+                    builder.append_block_params_for_function_params(entry_block);
+                    builder.switch_to_block(entry_block);
+                    builder.seal_block(entry_block);
+
+                    // Get block params (skip closure_ptr at index 0, we load from global instead)
+                    let block_params: Vec<Value> = builder.block_params(entry_block).to_vec();
+
+                    // Load the closure from the exported global
+                    let data_gv = self.module.declare_data_in_func(data_id, builder.func);
+                    let data_ptr = builder.ins().global_value(types::I64, data_gv);
+                    // The global stores an f64 (NaN-boxed closure pointer)
+                    let closure_f64 = builder.ins().load(types::F64, MemFlags::new(), data_ptr, 0);
+                    // Convert to i64 for js_closure_call* which expects i64 closure pointer
+                    let closure_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), closure_f64);
+
+                    // Build call args: [closure_ptr, ...args]
+                    let mut call_args = vec![closure_ptr];
+                    for i in 0..params.len() {
+                        call_args.push(block_params[i + 1]); // +1 to skip wrapper's closure_ptr param
+                    }
+
+                    // Call the closure
+                    let closure_call_ref = self.module.declare_func_in_func(closure_call_id, builder.func);
+                    let call = builder.ins().call(closure_call_ref, &call_args);
+                    let result = builder.inst_results(call)[0];
+
+                    builder.ins().return_(&[result]);
+                    builder.finalize();
+                }
+
+                if let Err(e) = self.module.define_function(wrapper_id, &mut self.ctx) {
+                    eprintln!("=== VERIFIER ERROR in closure wrapper '{}' ===", name);
+                    eprintln!("Error: {}", e);
+                    return Err(anyhow!("Error compiling closure wrapper '{}': {}", name, e));
+                }
+                self.module.clear_context(&mut self.ctx);
+            }
+        }
+
+        Ok(())
     }
 
     fn compile_init(&mut self, module_name: &str, stmts: &[Stmt], exported_native_instances: &[(String, String, String)], exported_objects: &[String], exported_functions: &[(String, u32)]) -> Result<()> {
@@ -11146,6 +11644,7 @@ impl Compiler {
                 builder.ins().return_(&[zero]);
             }
 
+            let fn_name = if self.is_entry_module { "main" } else { module_name };
             builder.finalize();
         }
 
@@ -12067,41 +12566,53 @@ fn compile_stmt(
 
             let i32_shadow: Option<Variable> = None;
 
-            locals.insert(*id, LocalInfo { var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: false, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None });
+            locals.insert(*id, LocalInfo { var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: false, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None });
         }
         Stmt::Return(expr) => {
-            // Get expected return type from function signature
-            let ret_type = builder.func.signature.returns.first().map(|p| p.value_type).unwrap_or(types::F64);
+            // Check if this is a void function (no return type) - e.g., constructors
+            let is_void = builder.func.signature.returns.is_empty();
 
-            let val = if let Some(e) = expr {
-                compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, e, this_ctx)?
-            } else {
-                // Return 0 in the appropriate type for the function signature
-                match ret_type {
-                    types::I32 => builder.ins().iconst(types::I32, 0),
-                    types::I64 => builder.ins().iconst(types::I64, 0),
-                    _ => builder.ins().f64const(0.0),
+            if is_void {
+                // Void function - return without a value
+                // If there's an expression, compile it for side effects but don't return it
+                if let Some(e) = expr {
+                    compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, e, this_ctx)?;
                 }
-            };
-            // Check if return type expects i64 but expression returns f64 (or vice versa)
-            // This handles cases like returning array literals from functions with array return type
-            let val_type = builder.func.dfg.value_type(val);
-            let val = if ret_type == types::I64 && val_type == types::F64 {
-                // Expression returned f64, need i64 - bitcast
-                builder.ins().bitcast(types::I64, MemFlags::new(), val)
-            } else if ret_type == types::F64 && val_type == types::I64 {
-                // Expression returned i64 (pointer), convert to f64 for function returning f64
-                builder.ins().bitcast(types::F64, MemFlags::new(), val)
-            } else if ret_type == types::I32 && val_type == types::F64 {
-                // Expression returned f64, need i32 - truncate
-                builder.ins().fcvt_to_sint(types::I32, val)
-            } else if ret_type == types::I32 && val_type == types::I64 {
-                // Expression returned i64, need i32 - truncate
-                builder.ins().ireduce(types::I32, val)
+                builder.ins().return_(&[]);
             } else {
-                val
-            };
-            builder.ins().return_(&[val]);
+                // Function has return type
+                let ret_type = builder.func.signature.returns.first().map(|p| p.value_type).unwrap_or(types::F64);
+
+                let val = if let Some(e) = expr {
+                    compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, e, this_ctx)?
+                } else {
+                    // Return 0 in the appropriate type for the function signature
+                    match ret_type {
+                        types::I32 => builder.ins().iconst(types::I32, 0),
+                        types::I64 => builder.ins().iconst(types::I64, 0),
+                        _ => builder.ins().f64const(0.0),
+                    }
+                };
+                // Check if return type expects i64 but expression returns f64 (or vice versa)
+                // This handles cases like returning array literals from functions with array return type
+                let val_type = builder.func.dfg.value_type(val);
+                let val = if ret_type == types::I64 && val_type == types::F64 {
+                    // Expression returned f64, need i64 - bitcast
+                    builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                } else if ret_type == types::F64 && val_type == types::I64 {
+                    // Expression returned i64 (pointer), convert to f64 for function returning f64
+                    builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                } else if ret_type == types::I32 && val_type == types::F64 {
+                    // Expression returned f64, need i32 - truncate
+                    builder.ins().fcvt_to_sint(types::I32, val)
+                } else if ret_type == types::I32 && val_type == types::I64 {
+                    // Expression returned i64, need i32 - truncate
+                    builder.ins().ireduce(types::I32, val)
+                } else {
+                    val
+                };
+                builder.ins().return_(&[val]);
+            }
         }
         Stmt::If { condition, then_branch, else_branch } => {
             let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
@@ -13387,7 +13898,7 @@ fn compile_stmt(
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: Some(field_vars.clone()),
-                        squared_cache: None, product_cache: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None,
                     });
 
                     scalar_replacement_vars = Some((obj_id, field_vars));
@@ -13723,6 +14234,112 @@ fn compile_stmt(
                 }
             } else {
                 // NON-UNROLLED LOOP: Original implementation
+
+                // OPTIMIZATION: Cache array raw pointers before the loop to avoid
+                // redundant js_nanbox_get_pointer calls on every iteration
+                fn collect_array_ids_from_expr(expr: &Expr, ids: &mut HashSet<LocalId>) {
+                    match expr {
+                        Expr::IndexGet { object, index } | Expr::IndexSet { object, index, .. } => {
+                            if let Expr::LocalGet(id) = object.as_ref() {
+                                ids.insert(*id);
+                            }
+                            collect_array_ids_from_expr(object, ids);
+                            collect_array_ids_from_expr(index, ids);
+                            if let Expr::IndexSet { value, .. } = expr {
+                                collect_array_ids_from_expr(value, ids);
+                            }
+                        }
+                        Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. } |
+                        Expr::Logical { left, right, .. } => {
+                            collect_array_ids_from_expr(left, ids);
+                            collect_array_ids_from_expr(right, ids);
+                        }
+                        Expr::LocalSet(_, val) => collect_array_ids_from_expr(val, ids),
+                        Expr::Unary { operand, .. } => collect_array_ids_from_expr(operand, ids),
+                        Expr::Call { callee, args, .. } => {
+                            collect_array_ids_from_expr(callee, ids);
+                            for a in args { collect_array_ids_from_expr(a, ids); }
+                        }
+                        Expr::PropertyGet { object, .. } => collect_array_ids_from_expr(object, ids),
+                        Expr::PropertySet { object, value, .. } => {
+                            collect_array_ids_from_expr(object, ids);
+                            collect_array_ids_from_expr(value, ids);
+                        }
+                        Expr::Conditional { condition, then_expr, else_expr } => {
+                            collect_array_ids_from_expr(condition, ids);
+                            collect_array_ids_from_expr(then_expr, ids);
+                            collect_array_ids_from_expr(else_expr, ids);
+                        }
+                        _ => {}
+                    }
+                }
+                fn collect_array_ids_from_stmts(stmts: &[Stmt], ids: &mut HashSet<LocalId>) {
+                    for s in stmts {
+                        match s {
+                            Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Throw(e) => {
+                                collect_array_ids_from_expr(e, ids);
+                            }
+                            Stmt::Let { init: Some(e), .. } => collect_array_ids_from_expr(e, ids),
+                            Stmt::If { condition, then_branch, else_branch, .. } => {
+                                collect_array_ids_from_expr(condition, ids);
+                                collect_array_ids_from_stmts(then_branch, ids);
+                                if let Some(eb) = else_branch { collect_array_ids_from_stmts(eb, ids); }
+                            }
+                            Stmt::For { init, condition, update, body } => {
+                                if let Some(init_s) = init { collect_array_ids_from_stmts(&[init_s.as_ref().clone()], ids); }
+                                if let Some(c) = condition { collect_array_ids_from_expr(c, ids); }
+                                if let Some(u) = update { collect_array_ids_from_expr(u, ids); }
+                                collect_array_ids_from_stmts(body, ids);
+                            }
+                            Stmt::While { condition, body } => {
+                                collect_array_ids_from_expr(condition, ids);
+                                collect_array_ids_from_stmts(body, ids);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                let mut array_ids_in_body: HashSet<LocalId> = HashSet::new();
+                collect_array_ids_from_stmts(body, &mut array_ids_in_body);
+
+                // Cache raw pointers for arrays used in this loop
+                let mut cached_array_ids: Vec<LocalId> = Vec::new();
+                for arr_id in &array_ids_in_body {
+                    if let Some(info) = locals.get(arr_id) {
+                        if info.is_array && !info.is_mixed_array && !info.is_union && info.cached_array_ptr.is_none() {
+                            // Extract raw pointer once and cache it
+                            let arr_val = builder.use_var(info.var);
+                            let val_type = builder.func.dfg.value_type(arr_val);
+                            let raw_ptr = if val_type == types::I64 {
+                                // Already a raw I64 pointer - use directly, no FFI needed
+                                arr_val
+                            } else {
+                                // F64 (NaN-boxed) - extract via runtime function
+                                let arr_f64 = ensure_f64(builder, arr_val);
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                let call = builder.ins().call(get_ptr_ref, &[arr_f64]);
+                                builder.inst_results(call)[0]
+                            };
+
+                            // Create a cached variable for this pointer
+                            let cache_var = Variable::new(*next_var);
+                            *next_var += 1;
+                            builder.declare_var(cache_var, types::I64);
+                            builder.def_var(cache_var, raw_ptr);
+
+                            cached_array_ids.push(*arr_id);
+                            // We need to set it after collecting all, to avoid borrow conflict
+                            drop(info);
+                            if let Some(info_mut) = locals.get_mut(arr_id) {
+                                info_mut.cached_array_ptr = Some(cache_var);
+                            }
+                        }
+                    }
+                }
+
                 let header_block = builder.create_block();
                 let body_block = builder.create_block();
                 let update_block = builder.create_block();
@@ -13815,6 +14432,13 @@ fn compile_stmt(
                         idx_info.var = orig_f64_var;
                         idx_info.is_i32 = false;
                         idx_info.bounded_by_array = None;
+                    }
+                }
+
+                // Clear cached array pointers after the loop
+                for arr_id in &cached_array_ids {
+                    if let Some(info) = locals.get_mut(arr_id) {
+                        info.cached_array_ptr = None;
                     }
                 }
             }
@@ -13932,24 +14556,24 @@ fn compile_stmt(
             collect_assigned_in_stmts(body, &mut try_assigned);
 
             // Create stack slots for variables that exist before the try and are assigned in try
-            // Map: LocalId -> (StackSlot, is_i64, original_var, was_i32)
+            // Map: LocalId -> (StackSlot, actual_var_type, original_var, was_i32)
             // We need to store the original Variable because loop optimization might change info.var
-            let mut try_var_slots: HashMap<LocalId, (StackSlot, bool, Variable, bool)> = HashMap::new();
+            let mut try_var_slots: HashMap<LocalId, (StackSlot, types::Type, Variable, bool)> = HashMap::new();
             for local_id in &try_assigned {
                 if let Some(info) = locals.get(local_id) {
-                    // Variable is stored as i64 only if is_pointer && !is_union
-                    let var_type = if info.is_pointer && !info.is_union { types::I64 } else { types::F64 };
-                    let is_i64 = info.is_pointer && !info.is_union;
+                    // Get the ACTUAL declared type of the variable from the builder
+                    // Don't recalculate - use what was actually declared
+                    let val = builder.use_var(info.var);
+                    let var_type = builder.func.dfg.value_type(val);
                     let slot = builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
                         8, // f64 or i64 = 8 bytes
                         8, // alignment
                     ));
                     // Store current value to slot before setjmp
-                    let val = builder.use_var(info.var);
                     builder.ins().stack_store(val, slot, 0);
                     // Store original var and is_i32 state for proper restoration after longjmp
-                    try_var_slots.insert(*local_id, (slot, is_i64, info.var, info.is_i32));
+                    try_var_slots.insert(*local_id, (slot, var_type, info.var, info.is_i32));
                 }
             }
 
@@ -13995,17 +14619,22 @@ fn compile_stmt(
                 // Only do this if the block isn't already terminated (e.g., by throw)
                 let current_after = builder.current_block().unwrap();
                 if !is_block_filled(builder, current_after) {
-                    for (local_id, (slot, is_i64, _orig_var, _was_i32)) in &try_var_slots {
+                    for (local_id, (slot, slot_type, _orig_var, _was_i32)) in &try_var_slots {
                         if let Some(info) = locals.get(local_id) {
                             let val = builder.use_var(info.var);
+                            let val_type = builder.func.dfg.value_type(val);
                             // Convert to the expected slot type if needed
                             // Loop optimization might have changed the variable to i32
                             let store_val = if info.is_i32 {
-                                // Variable is now i32, convert to f64 for storage
-                                builder.ins().fcvt_from_sint(types::F64, val)
-                            } else if *is_i64 && builder.func.dfg.value_type(val) == types::F64 {
+                                // Variable is now i32, convert to slot type for storage
+                                if *slot_type == types::I64 {
+                                    builder.ins().sextend(types::I64, val)
+                                } else {
+                                    builder.ins().fcvt_from_sint(types::F64, val)
+                                }
+                            } else if *slot_type == types::I64 && val_type == types::F64 {
                                 builder.ins().bitcast(types::I64, MemFlags::new(), val)
-                            } else if !*is_i64 && builder.func.dfg.value_type(val) == types::I64 {
+                            } else if *slot_type == types::F64 && val_type == types::I64 {
                                 builder.ins().bitcast(types::F64, MemFlags::new(), val)
                             } else {
                                 val
@@ -14037,9 +14666,8 @@ fn compile_stmt(
             // Restore variables from stack slots (longjmp may have clobbered SSA values)
             // CRITICAL: We must restore to the ORIGINAL variable, not the current info.var
             // Loop optimization inside the try block might have changed info.var to an i32 variable
-            for (local_id, (slot, is_i64, orig_var, was_i32)) in &try_var_slots {
-                let var_type = if *is_i64 { types::I64 } else { types::F64 };
-                let val = builder.ins().stack_load(var_type, *slot, 0);
+            for (local_id, (slot, slot_type, orig_var, was_i32)) in &try_var_slots {
+                let val = builder.ins().stack_load(*slot_type, *slot, 0);
                 // Always restore to the original variable (which has the correct declared type)
                 builder.def_var(*orig_var, val);
                 // Restore the LocalInfo to its original state
@@ -14093,7 +14721,7 @@ fn compile_stmt(
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None,
                     });
                 }
 
@@ -16953,24 +17581,17 @@ fn compile_expr(
             // Compile array
             let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;
 
-            // Check if array is from a union-typed variable or imported (ExternFuncRef) - both are NaN-boxed
-            let is_nanboxed_array = if let Expr::LocalGet(id) = array.as_ref() {
-                locals.get(id).map(|i| i.is_union).unwrap_or(false)
-            } else {
-                // ExternFuncRef (imported variables) are always NaN-boxed
-                matches!(array.as_ref(), Expr::ExternFuncRef { .. })
-            };
-
-            // Extract pointer from NaN-boxed value if needed
-            let arr_ptr = if is_nanboxed_array {
-                let arr_f64 = ensure_f64(builder, arr_val);
+            // The array might be NaN-boxed (from split() result, Type::Any vars, etc.) or a raw i64 pointer
+            // Use Cranelift value type to determine: F64 = NaN-boxed, I64 = raw pointer
+            let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
                 let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                     .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
                 let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
-                let call = builder.ins().call(get_ptr_ref, &[arr_f64]);
+                let call = builder.ins().call(get_ptr_ref, &[arr_val]);
                 builder.inst_results(call)[0]
             } else {
-                builder.ins().bitcast(types::I64, MemFlags::new(), arr_val)
+                // Already an i64 pointer
+                arr_val
             };
 
             // Compile separator (or use null for default comma)
@@ -17552,9 +18173,16 @@ fn compile_expr(
 
                             // Convert to string pointer if needed
                             let rhs_ptr = if is_string_operand(right, locals) {
-                                // String operand - extract raw pointer from NaN-boxed value
-                                let rhs_call = builder.ins().call(get_str_ptr_ref, &[rhs_val]);
-                                builder.inst_results(rhs_call)[0]
+                                // String operand - check if already a raw i64 pointer
+                                let rhs_type = builder.func.dfg.value_type(rhs_val);
+                                if rhs_type == types::I64 {
+                                    // Already a raw pointer (e.g., from string parameter)
+                                    rhs_val
+                                } else {
+                                    // f64 (NaN-boxed) - extract raw pointer
+                                    let rhs_call = builder.ins().call(get_str_ptr_ref, &[rhs_val]);
+                                    builder.inst_results(rhs_call)[0]
+                                }
                             } else {
                                 // Number to string
                                 let num_to_str_func = extern_funcs.get("js_number_to_string")
@@ -17610,9 +18238,17 @@ fn compile_expr(
                 Ok(boxed_val)
             } else if info.is_pointer && !info.is_union {
                 // Variable is stored as i64 (pointer type without union)
-                let ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val);
-                builder.def_var(info.var, ptr);
-                Ok(val)
+                let val_type = builder.func.dfg.value_type(val);
+                if val_type == types::I64 {
+                    // Already I64, just store directly
+                    builder.def_var(info.var, val);
+                    Ok(val)
+                } else {
+                    // Need to bitcast
+                    let ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                    builder.def_var(info.var, ptr);
+                    Ok(val)
+                }
             } else {
                 // Ensure type matches the variable's declared type
                 // Get declared type by checking the variable's current value type
@@ -17623,9 +18259,11 @@ fn compile_expr(
                 let converted_val = if var_type != val_type {
                     // Types don't match - convert
                     if var_type == types::F64 && val_type == types::I64 {
-                        builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                        let result = builder.ins().bitcast(types::F64, MemFlags::new(), val);
+                        result
                     } else if var_type == types::I64 && val_type == types::F64 {
-                        builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                        let result = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                        result
                     } else if val_type == types::I32 && var_type == types::F64 {
                         builder.ins().fcvt_from_sint(types::F64, val)
                     } else if val_type == types::I32 && var_type == types::I64 {
@@ -24643,15 +25281,20 @@ fn compile_expr(
             if let Expr::LocalGet(id) = object.as_ref() {
                 if let Some(info) = locals.get(id) {
                     if info.is_array {
-                        // Get the array pointer - may be NaN-boxed from await results
-                        let arr_val = builder.use_var(info.var);
-                        let arr_f64 = ensure_f64(builder, arr_val);
-                        // Extract pointer from NaN-boxed value (handles both raw and boxed)
-                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
-                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
-                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
-                        let call = builder.ins().call(get_ptr_ref, &[arr_f64]);
-                        let arr_ptr = builder.inst_results(call)[0];
+                        // OPTIMIZATION: Use cached raw pointer if available (hoisted out of loop)
+                        let arr_ptr = if let Some(cache_var) = info.cached_array_ptr {
+                            builder.use_var(cache_var)
+                        } else {
+                            // Get the array pointer - may be NaN-boxed from await results
+                            let arr_val = builder.use_var(info.var);
+                            let arr_f64 = ensure_f64(builder, arr_val);
+                            // Extract pointer from NaN-boxed value (handles both raw and boxed)
+                            let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                            let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                            let call = builder.ins().call(get_ptr_ref, &[arr_f64]);
+                            builder.inst_results(call)[0]
+                        };
                         // OPTIMIZATION: Use native i32 or i32 shadow for integer variables, avoiding f64->i32 conversion
                         let idx_i32 = if let Expr::Integer(n) = index.as_ref() {
                             // Integer literal - compile directly as i32
@@ -24874,8 +25517,13 @@ fn compile_expr(
             if let Expr::LocalGet(id) = object.as_ref() {
                 if let Some(info) = locals.get(id) {
                     if info.is_array {
-                        let arr_val = builder.use_var(info.var);
-                        let arr_ptr = ensure_i64(builder, arr_val);
+                        // OPTIMIZATION: Use cached raw pointer if available (hoisted out of loop)
+                        let arr_ptr = if let Some(cache_var) = info.cached_array_ptr {
+                            builder.use_var(cache_var)
+                        } else {
+                            let arr_val = builder.use_var(info.var);
+                            ensure_i64(builder, arr_val)
+                        };
                         let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
                         // OPTIMIZATION: Use native i32 or i32 shadow for integer variables, avoiding f64->i32 conversion

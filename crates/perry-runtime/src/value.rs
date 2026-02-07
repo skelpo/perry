@@ -998,6 +998,22 @@ pub unsafe extern "C" fn js_dynamic_object_keys(ptr: i64) -> *mut crate::array::
     crate::object::js_object_keys(ptr as *const crate::object::ObjectHeader)
 }
 
+/// Get a property from an object by name.
+/// This is the main entry point used by codegen for dynamic property access.
+/// Delegates to js_dynamic_object_get_property which handles JS handles, native objects,
+/// strings, and error objects.
+///
+/// Parameters:
+/// - object: NaN-boxed f64 containing the object
+/// - name_ptr: i64 pointer to the property name bytes
+/// - name_len: i64 length of the property name
+///
+/// Returns: NaN-boxed f64 containing the property value (or undefined)
+#[no_mangle]
+pub unsafe extern "C" fn js_get_property(object: f64, name_ptr: i64, name_len: i64) -> f64 {
+    js_dynamic_object_get_property(object, name_ptr as *const i8, name_len as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.114
+**Current Version:** 0.2.115
 
 ## Workflow Requirements
 
@@ -264,9 +264,26 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.114)
+## Recent Fixes (v0.2.37-0.2.115)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.115
+- Performance optimizations: array pointer caching in loops and integer function specialization
+  - **Array pointer caching**: Hoist `js_nanbox_get_pointer` calls out of for-loops for arrays used in IndexGet/IndexSet
+    - Before: Every `a[i*size+k]` access called `js_nanbox_get_pointer` FFI to extract the raw array pointer
+    - After: Array pointer extracted once before loop, cached in a Cranelift Variable, reused for all accesses
+    - Matrix multiply benchmark improved from ~91ms to ~71ms (Perry) vs ~36ms (Node) — 2.5x→1.75x
+    - Added `cached_array_ptr: Option<Variable>` field to `LocalInfo` struct
+    - Helper functions `collect_array_ids_from_expr` and `collect_array_ids_from_stmts` scan loop bodies for array usage
+  - **Integer function specialization**: Detect functions using only integer operations and generate i64 variants
+    - `is_integer_only_function` checks: all params Number/Any, return Number/Any, body only uses integer arithmetic/comparisons/self-calls
+    - For qualifying functions, generates `{name}_i64` with I64 params/return using `icmp`/`iadd`/`isub` instead of `fcmp`/`fadd`/`fsub`
+    - Original function becomes thin wrapper: `f64→i64` (fcvt_to_sint), call i64 variant, `i64→f64` (fcvt_from_sint)
+    - Self-recursive calls within i64 variant call the i64 variant directly (no conversion overhead)
+    - Fibonacci benchmark: Perry ~505ms vs Node ~1050ms — Perry is now **2x faster** than Node.js (was 1.16x slower)
+    - Added `compile_integer_specialized_function`, `compile_i64_body`, `compile_i64_stmt`, `compile_i64_expr` methods
+  - New benchmark file: `benchmarks/suite/16_matrix_multiply.ts`
 
 ### v0.2.114
 - Fix Fastify request properties (`request.method`, `request.url`, etc.) returning numbers instead of strings

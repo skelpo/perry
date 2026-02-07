@@ -671,6 +671,17 @@ fn try_inline_call(
                 }
 
                 let mut inlined_body = func.body.clone();
+
+                // Collect all LocalIds from Let statements in the body and remap them
+                let body_local_ids = collect_body_local_ids(&inlined_body);
+                for old_id in body_local_ids {
+                    if !param_map.contains_key(&old_id) {
+                        let new_id = *next_local_id;
+                        *next_local_id += 1;
+                        param_map.insert(old_id, Expr::LocalGet(new_id));
+                    }
+                }
+
                 substitute_locals_in_stmts(&mut inlined_body, &param_map, next_local_id);
 
                 setup_stmts.extend(inlined_body);
@@ -715,6 +726,17 @@ fn try_inline_call(
 
                         // Clone and substitute the method body
                         let mut inlined_body = method_candidate.func.body.clone();
+
+                        // Collect all LocalIds from Let statements in the body and remap them
+                        let body_local_ids = collect_body_local_ids(&inlined_body);
+                        for old_id in body_local_ids {
+                            if !param_map.contains_key(&old_id) {
+                                let new_id = *next_local_id;
+                                *next_local_id += 1;
+                                param_map.insert(old_id, Expr::LocalGet(new_id));
+                            }
+                        }
+
                         substitute_locals_in_stmts(&mut inlined_body, &param_map, next_local_id);
                         substitute_this_in_stmts(&mut inlined_body, *obj_id);
 
@@ -884,6 +906,56 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         Expr::JsonStringify(inner) | Expr::JsonParse(inner) => {
             substitute_locals(inner, param_map, next_local_id);
         }
+        // Math operations
+        Expr::MathFloor(inner) | Expr::MathCeil(inner) | Expr::MathRound(inner) |
+        Expr::MathAbs(inner) | Expr::MathSqrt(inner) => {
+            substitute_locals(inner, param_map, next_local_id);
+        }
+        Expr::MathPow(base, exp) => {
+            substitute_locals(base, param_map, next_local_id);
+            substitute_locals(exp, param_map, next_local_id);
+        }
+        Expr::MathMin(exprs) | Expr::MathMax(exprs) => {
+            for e in exprs {
+                substitute_locals(e, param_map, next_local_id);
+            }
+        }
+        // New expressions
+        Expr::New { args, .. } => {
+            for arg in args {
+                substitute_locals(arg, param_map, next_local_id);
+            }
+        }
+        Expr::NewDynamic { callee, args } => {
+            substitute_locals(callee, param_map, next_local_id);
+            for arg in args {
+                substitute_locals(arg, param_map, next_local_id);
+            }
+        }
+        Expr::JsNew { module_handle, args, .. } => {
+            substitute_locals(module_handle, param_map, next_local_id);
+            for arg in args {
+                substitute_locals(arg, param_map, next_local_id);
+            }
+        }
+        Expr::JsNewFromHandle { constructor, args } => {
+            substitute_locals(constructor, param_map, next_local_id);
+            for arg in args {
+                substitute_locals(arg, param_map, next_local_id);
+            }
+        }
+        // Closure expressions - substitute in body as well
+        Expr::Closure { body, .. } => {
+            substitute_locals_in_stmts(body, param_map, next_local_id);
+        }
+        // String operations
+        Expr::StringSplit(string, delimiter) => {
+            substitute_locals(string, param_map, next_local_id);
+            substitute_locals(delimiter, param_map, next_local_id);
+        }
+        Expr::StringFromCharCode(code) | Expr::StringCoerce(code) => {
+            substitute_locals(code, param_map, next_local_id);
+        }
         _ => {}
     }
 }
@@ -987,11 +1059,85 @@ fn substitute_this_in_stmts(stmts: &mut Vec<Stmt>, obj_id: LocalId) {
 }
 
 /// Substitute local variable references in statements
+/// Collect all LocalIds defined by Let statements in a body (for remapping during inlining)
+fn collect_body_local_ids(stmts: &[Stmt]) -> Vec<LocalId> {
+    let mut ids = Vec::new();
+
+    fn collect_from_stmt(stmt: &Stmt, ids: &mut Vec<LocalId>) {
+        match stmt {
+            Stmt::Let { id, .. } => {
+                ids.push(*id);
+            }
+            Stmt::If { then_branch, else_branch, .. } => {
+                for s in then_branch {
+                    collect_from_stmt(s, ids);
+                }
+                if let Some(else_b) = else_branch {
+                    for s in else_b {
+                        collect_from_stmt(s, ids);
+                    }
+                }
+            }
+            Stmt::While { body, .. } => {
+                for s in body {
+                    collect_from_stmt(s, ids);
+                }
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(init_stmt) = init {
+                    collect_from_stmt(init_stmt, ids);
+                }
+                for s in body {
+                    collect_from_stmt(s, ids);
+                }
+            }
+            Stmt::Try { body, catch, finally } => {
+                for s in body {
+                    collect_from_stmt(s, ids);
+                }
+                if let Some(catch_clause) = catch {
+                    // Also collect the catch parameter if present
+                    if let Some((param_id, _)) = &catch_clause.param {
+                        ids.push(*param_id);
+                    }
+                    for s in &catch_clause.body {
+                        collect_from_stmt(s, ids);
+                    }
+                }
+                if let Some(finally_stmts) = finally {
+                    for s in finally_stmts {
+                        collect_from_stmt(s, ids);
+                    }
+                }
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    for s in &case.body {
+                        collect_from_stmt(s, ids);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for stmt in stmts {
+        collect_from_stmt(stmt, &mut ids);
+    }
+    ids
+}
+
 fn substitute_locals_in_stmts(stmts: &mut Vec<Stmt>, param_map: &HashMap<LocalId, Expr>, next_local_id: &mut LocalId) {
     for stmt in stmts.iter_mut() {
         match stmt {
-            Stmt::Let { init: Some(expr), .. } => {
-                substitute_locals(expr, param_map, next_local_id);
+            Stmt::Let { id, init, .. } => {
+                // Remap the Let's id if it's in the param_map
+                if let Some(Expr::LocalGet(new_id)) = param_map.get(id) {
+                    *id = *new_id;
+                }
+                if let Some(expr) = init {
+                    substitute_locals(expr, param_map, next_local_id);
+                }
             }
             Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
                 substitute_locals(expr, param_map, next_local_id);
