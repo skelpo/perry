@@ -18900,42 +18900,15 @@ fn compile_expr(
                 }
             }
 
-            // I32 FAST PATH: When both operands can be i32, use native integer arithmetic
-            // (iadd/isub/imul) and return i32 directly. Avoids f64 conversions in tight loops
-            // where loop counters and integer parameters are used for array indexing.
-            // Must run BEFORE FMA to prevent fma(i,size,k) on integer index expressions.
-            fn can_be_i32(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
-                match expr {
-                    Expr::Integer(n) => *n >= i32::MIN as i64 && *n <= i32::MAX as i64,
-                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_i32 || i.is_integer).unwrap_or(false),
-                    Expr::Binary { op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul, left, right } => {
-                        can_be_i32(left, locals) && can_be_i32(right, locals)
-                    }
-                    _ => false,
-                }
-            }
-            fn to_i32(builder: &mut FunctionBuilder, val: Value) -> Value {
-                let vt = builder.func.dfg.value_type(val);
-                if vt == types::I32 { val }
-                else if vt == types::F64 { builder.ins().fcvt_to_sint(types::I32, val) }
-                else if vt == types::I64 { builder.ins().ireduce(types::I32, val) }
-                else { val }
-            }
-            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul)
-                && can_be_i32(left, locals)
-                && can_be_i32(right, locals)
-            {
-                let l = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
-                let r = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
-                let l_i32 = to_i32(builder, l);
-                let r_i32 = to_i32(builder, r);
-                return Ok(match op {
-                    BinaryOp::Add => builder.ins().iadd(l_i32, r_i32),
-                    BinaryOp::Sub => builder.ins().isub(l_i32, r_i32),
-                    BinaryOp::Mul => builder.ins().imul(l_i32, r_i32),
-                    _ => unreachable!(),
-                });
-            }
+            // I32 FAST PATH: DISABLED
+            // This optimization produced i32 results that weren't converted back to f64
+            // when used in contexts expecting f64 (Math.*, function calls, etc.).
+            // The loop counter optimization already uses i32 for array indexing via
+            // the IndexGet special handling. Disabling this broader optimization
+            // fixes many type mismatch errors.
+            //
+            // If performance is a concern, this could be re-enabled with careful
+            // tracking of which expressions are ONLY used for array indexing.
 
             // CSE OPTIMIZATION: Check for cached squared value (var * var) or product (var * other_var)
             if *op == BinaryOp::Mul {
@@ -26474,8 +26447,14 @@ fn compile_expr(
                         let ptr_call = builder.ins().call(get_ptr_ref, &[config_f64]);
                         let config_ptr = builder.inst_results(ptr_call)[0];
 
-                        // Helper to create field name string constant
-                        fn create_field_name(module: &mut dyn cranelift_module::Module, builder: &mut FunctionBuilder, name: &str) -> Result<Value> {
+                        // Helper to create a StringHeader* for a field name
+                        // js_object_get_field_by_name_f64 expects *const StringHeader, not raw C strings
+                        fn create_field_name_str(
+                            module: &mut dyn cranelift_module::Module,
+                            builder: &mut FunctionBuilder,
+                            extern_funcs: &std::collections::HashMap<String, cranelift_module::FuncId>,
+                            name: &str,
+                        ) -> Result<Value> {
                             use cranelift_module::Linkage;
                             let name_bytes = name.as_bytes();
                             let data_id = module.declare_data(
@@ -26485,16 +26464,21 @@ fn compile_expr(
                                 false,
                             )?;
                             let mut data_desc = cranelift_module::DataDescription::new();
-                            let mut bytes = name_bytes.to_vec();
-                            bytes.push(0); // null terminate
-                            data_desc.define(bytes.into_boxed_slice());
+                            data_desc.define(name_bytes.to_vec().into_boxed_slice());
                             module.define_data(data_id, &data_desc)?;
                             let gv = module.declare_data_in_func(data_id, builder.func);
-                            Ok(builder.ins().global_value(types::I64, gv))
+                            let raw_ptr = builder.ins().global_value(types::I64, gv);
+                            let len_val = builder.ins().iconst(types::I32, name_bytes.len() as i64);
+                            // Call js_string_from_bytes(ptr, len) -> *mut StringHeader
+                            let str_func = extern_funcs.get("js_string_from_bytes")
+                                .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
+                            let str_ref = module.declare_func_in_func(*str_func, builder.func);
+                            let str_call = builder.ins().call(str_ref, &[raw_ptr, len_val]);
+                            Ok(builder.inst_results(str_call)[0])
                         }
 
                         // Get "title" field
-                        let title_name_ptr = create_field_name(module, builder, "title")?;
+                        let title_name_ptr = create_field_name_str(module, builder, extern_funcs, "title")?;
                         let title_call = builder.ins().call(get_field_ref, &[config_ptr, title_name_ptr]);
                         let title_f64 = builder.inst_results(title_call)[0];
                         let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
@@ -26504,20 +26488,21 @@ fn compile_expr(
                         let title_ptr = builder.inst_results(str_call)[0];
 
                         // Get "width" field
-                        let width_name_ptr = create_field_name(module, builder, "width")?;
+                        let width_name_ptr = create_field_name_str(module, builder, extern_funcs, "width")?;
                         let width_call = builder.ins().call(get_field_ref, &[config_ptr, width_name_ptr]);
                         let width_f64 = builder.inst_results(width_call)[0];
 
                         // Get "height" field
-                        let height_name_ptr = create_field_name(module, builder, "height")?;
+                        let height_name_ptr = create_field_name_str(module, builder, extern_funcs, "height")?;
                         let height_call = builder.ins().call(get_field_ref, &[config_ptr, height_name_ptr]);
                         let height_f64 = builder.inst_results(height_call)[0];
 
-                        // Get "body" field
-                        let body_name_ptr = create_field_name(module, builder, "body")?;
+                        // Get "body" field - extract handle via js_nanbox_get_pointer (not fcvt_to_sint)
+                        let body_name_ptr = create_field_name_str(module, builder, extern_funcs, "body")?;
                         let body_call = builder.ins().call(get_field_ref, &[config_ptr, body_name_ptr]);
                         let body_f64 = builder.inst_results(body_call)[0];
-                        let body_i64 = builder.ins().fcvt_to_sint(types::I64, body_f64);
+                        let body_ptr_call = builder.ins().call(get_ptr_ref, &[body_f64]);
+                        let body_i64 = builder.inst_results(body_ptr_call)[0];
 
                         // Create app
                         let app_func = extern_funcs.get("perry_ui_app_create")
