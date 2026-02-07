@@ -15760,34 +15760,43 @@ fn compile_expr(
             }
         }
         // Math operations - using Cranelift's built-in floating-point instructions
+        // Ensure f64 for all inputs (handle i32 from loop counter optimization)
         Expr::MathFloor(expr) => {
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
-            Ok(builder.ins().floor(val))
+            let val_f64 = ensure_f64(builder, val);
+            Ok(builder.ins().floor(val_f64))
         }
         Expr::MathCeil(expr) => {
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
-            Ok(builder.ins().ceil(val))
+            let val_f64 = ensure_f64(builder, val);
+            Ok(builder.ins().ceil(val_f64))
         }
         Expr::MathRound(expr) => {
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
-            Ok(builder.ins().nearest(val))
+            let val_f64 = ensure_f64(builder, val);
+            Ok(builder.ins().nearest(val_f64))
         }
         Expr::MathAbs(expr) => {
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
-            Ok(builder.ins().fabs(val))
+            let val_f64 = ensure_f64(builder, val);
+            Ok(builder.ins().fabs(val_f64))
         }
         Expr::MathSqrt(expr) => {
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
-            Ok(builder.ins().sqrt(val))
+            let val_f64 = ensure_f64(builder, val);
+            Ok(builder.ins().sqrt(val_f64))
         }
         Expr::MathPow(base_expr, exp_expr) => {
             let base = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, base_expr, this_ctx)?;
             let exp = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, exp_expr, this_ctx)?;
+            // Ensure arguments are f64 (handle i32 from loop counter optimization)
+            let base_f64 = ensure_f64(builder, base);
+            let exp_f64 = ensure_f64(builder, exp);
             // Call js_math_pow runtime function
             let func = extern_funcs.get("js_math_pow")
                 .ok_or_else(|| anyhow!("js_math_pow not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
-            let call = builder.ins().call(func_ref, &[base, exp]);
+            let call = builder.ins().call(func_ref, &[base_f64, exp_f64]);
             Ok(builder.inst_results(call)[0])
         }
         Expr::MathMin(ref args) => {
@@ -25311,6 +25320,10 @@ fn compile_expr(
                         let call = if val_type == types::I64 {
                             // Value is a pointer (i64) - use js_array_push_jsvalue
                             builder.ins().call(push_jsvalue_ref, &[arr_ptr, val])
+                        } else if val_type == types::I32 {
+                            // Value is i32 (from loop counter optimization) - convert to f64
+                            let val_f64 = builder.ins().fcvt_from_sint(types::F64, val);
+                            builder.ins().call(push_f64_ref, &[arr_ptr, val_f64])
                         } else {
                             // Value is f64 - use js_array_push_f64
                             builder.ins().call(push_f64_ref, &[arr_ptr, val])
