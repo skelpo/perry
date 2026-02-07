@@ -1,0 +1,37 @@
+[package]
+name = "perry-ui-macos"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+perry-ui = { path = "../perry-ui" }
+perry-runtime = { path = "../perry-runtime" }
+libc = "0.2"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSThread",
+    "NSRunLoop",
+    "NSGeometry",
+] }
+objc2-core-foundation = { version = "0.3", features = [
+    "CFCGTypes",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSWindow",
+    "NSView",
+    "NSButton",
+    "NSTextField",
+    "NSStackView",
+    "NSControl",
+    "NSText",
+    "NSRunningApplication",
+    "NSResponder",
+    "NSLayoutConstraint",
+    "NSUserInterfaceLayout",
+    "NSGraphics",
+] }

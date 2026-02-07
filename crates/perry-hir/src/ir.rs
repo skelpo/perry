@@ -49,6 +49,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "fastify",
     // Node.js built-in modules
     "async_hooks",
+    // Perry native UI
+    "perry/ui",
 ];
 
 /// Check if a module path refers to a native stdlib module

@@ -1,0 +1,10 @@
+[package]
+name = "perry-ui"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+perry-runtime = { path = "../perry-runtime" }

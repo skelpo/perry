@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.115
+**Current Version:** 0.2.117
 
 ## Workflow Requirements
 
@@ -103,6 +103,8 @@ TypeScript (.ts) → Parse (SWC) → AST → Lower → HIR → Transform → Cod
   - `promise.rs` - Promise implementation with closure-based callbacks
   - `builtins.rs` - Built-in functions (console.log, etc.)
 - **perry-stdlib** - Standard library (Node.js API support: mysql2, redis, fetch, etc.)
+- **perry-ui** - Platform-agnostic UI types (WidgetHandle, WidgetKind, StateId)
+- **perry-ui-macos** - macOS AppKit UI backend (NSWindow, NSButton, NSTextField, NSStackView)
 - **perry-jsruntime** - JavaScript interop via QuickJS
 
 ### Key Data Flow
@@ -264,9 +266,53 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.115)
+## Recent Fixes (v0.2.37-0.2.117)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.117
+- Integer arithmetic optimization for array index computations in tight loops
+  - **Number-typed function parameters now marked `is_integer`**: Enables loop counter i32 optimization
+    (Pattern 4) for loops bounded by function parameters like `for (let i = 0; i < size; i++)`
+  - **i32 arithmetic fast path in Binary expressions**: When both operands of Add/Sub/Mul can be
+    i32 (loop counters, integer-typed variables, integer literals, or sub-expressions of these),
+    uses native `iadd`/`isub`/`imul` instead of `fadd`/`fsub`/`fmul` with f64 conversions
+    - Placed BEFORE FMA optimization to prevent `fma(i, size, k)` on pure integer index expressions
+    - Recursive `can_be_i32` check handles nested expressions like `i * size + k`
+    - `to_i32` helper converts f64→i32 via `fcvt_to_sint` when needed (e.g., for `is_integer` params)
+  - **i32 index passthrough in IndexGet/IndexSet**: When compiled index expression already produces
+    i32, skips the `ensure_f64` → `fcvt_to_sint` round-trip conversion
+  - Matrix multiply benchmark: ~69ms → ~50ms (Perry) vs ~37ms (Node) — 1.86x → 1.35x gap
+  - All existing benchmarks and tests unaffected (no regressions)
+
+### v0.2.116
+- Add native macOS UI support via `perry/ui` module (Phase 1)
+  - New crate `perry-ui`: Platform-agnostic core types (WidgetHandle, WidgetKind, StateId)
+  - New crate `perry-ui-macos`: AppKit backend via objc2 bindings, produces `libperry_ui_macos.a`
+  - Widgets: Text (NSTextField label), Button (NSButton with closure callback), VStack/HStack (NSStackView)
+  - State management: `State(initialValue)` creates reactive state, `.value` reads, `.set(v)` updates
+  - App: `App({ title, width, height, body })` creates NSWindow and runs NSApplication event loop
+  - Button callbacks use `define_class!` to create PerryButtonTarget NSObject subclass with target-action pattern
+  - Widget registry: thread-local `Vec<Retained<NSView>>` with 1-based handle IDs
+  - Stack views auto-detect NSStackView via `isKindOfClass` for `addArrangedSubview`
+  - HIR: Added `"perry/ui"` to NATIVE_MODULES, State instance tracking for `.value`/`.set()` method dispatch
+  - Codegen: 11 `perry_ui_*` extern function declarations, special handling for VStack/HStack children arrays,
+    Button label+closure extraction, App config object field extraction
+  - Linker: Auto-detects `perry/ui` imports, conditionally links `libperry_ui_macos.a` and `-framework AppKit`
+  - Non-UI programs are completely unaffected (no UI libs linked, no size increase)
+  - Example usage:
+    ```typescript
+    import { App, VStack, Text, Button, State } from "perry/ui"
+    const count = State(0)
+    App({
+        title: "Counter", width: 400, height: 300,
+        body: VStack(16, [
+            Text(`Count: ${count.value}`),
+            Button("Increment", () => count.set(count.value + 1)),
+        ])
+    })
+    ```
+  - Build UI crate: `cargo build --release -p perry-ui-macos`
 
 ### v0.2.115
 - Performance optimizations: array pointer caching in loops and integer function specialization

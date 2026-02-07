@@ -63,6 +63,9 @@ pub struct LoweringContext {
     extern_func_types: Vec<(String, Vec<Type>, Type)>,
     /// Source file path (for import.meta.url)
     source_file_path: String,
+    /// Variables that hold closures or other values needing cross-module export globals
+    /// (arrow functions, object literals, call expressions, arrays, new expressions)
+    exportable_object_vars: HashSet<String>,
 }
 
 impl LoweringContext {
@@ -92,6 +95,7 @@ impl LoweringContext {
             current_class: None,
             extern_func_types: Vec::new(),
             source_file_path: source_file_path.into(),
+            exportable_object_vars: HashSet::new(),
         }
     }
 
@@ -1046,6 +1050,12 @@ fn lower_module_decl(
                                             // Register as native instance - the "class" is the module name for default exports
                                             ctx.register_native_instance(name.clone(), module_name.to_string(), "App".to_string());
                                         }
+                                        // Check if this is a named import that returns a handle (e.g., State from perry/ui)
+                                        if let Some((module_name, Some(method_name))) = ctx.lookup_native_module(func_name) {
+                                            if module_name == "perry/ui" && method_name == "State" {
+                                                ctx.register_native_instance(name.clone(), module_name.to_string(), "State".to_string());
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1077,7 +1087,17 @@ fn lower_module_decl(
 
                             // Register exported values that need cross-module globals
                             if needs_export_global {
-                                module.exported_objects.push(name);
+                                module.exported_objects.push(name.clone());
+                            }
+
+                            // Handle function aliases: export const foo = existingFunc;
+                            // If the init is an identifier that refers to a function, add to exported_functions
+                            if let ast::Expr::Ident(ident) = init.as_ref() {
+                                let ref_name = ident.sym.to_string();
+                                if let Some(func_id) = ctx.lookup_func(&ref_name) {
+                                    // The exported name is an alias to an existing function
+                                    module.exported_functions.push((name, func_id));
+                                }
                             }
                         }
                     }
@@ -1167,7 +1187,28 @@ fn lower_module_decl(
                         // If the local name refers to a function, add it to exported_functions
                         // so that a wrapper function is generated for cross-module calls
                         if let Some(func_id) = ctx.lookup_func(&local) {
-                            module.exported_functions.push((exported, func_id));
+                            module.exported_functions.push((exported.clone(), func_id));
+                        }
+
+                        // Check if the variable is a closure or other exportable object
+                        // by looking through init statements
+                        for stmt in &module.init {
+                            if let Stmt::Let { name, init: Some(init_expr), .. } = stmt {
+                                if name == &local {
+                                    let is_exportable = matches!(init_expr,
+                                        Expr::Closure { .. } |
+                                        Expr::Object(_) |
+                                        Expr::Array(_) |
+                                        Expr::Call { .. } |
+                                        Expr::New { .. } |
+                                        Expr::JsNew { .. }
+                                    );
+                                    if is_exportable {
+                                        module.exported_objects.push(exported.clone());
+                                    }
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -6852,6 +6893,12 @@ fn lower_var_decl_with_destructuring(
                             if let Some((module_name, None)) = ctx.lookup_native_module(func_name) {
                                 // Register as native instance - the "class" is "App" for default exports
                                 ctx.register_native_instance(name.clone(), module_name.to_string(), "App".to_string());
+                            }
+                            // Check if this is a named import that returns a handle (e.g., State from perry/ui)
+                            if let Some((module_name, Some(method_name))) = ctx.lookup_native_module(func_name) {
+                                if module_name == "perry/ui" && method_name == "State" {
+                                    ctx.register_native_instance(name.clone(), module_name.to_string(), "State".to_string());
+                                }
                             }
                         }
                     }

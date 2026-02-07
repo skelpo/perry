@@ -61,6 +61,8 @@ pub struct CompilationContext {
     pub import_map: HashMap<String, PathBuf>,
     /// Whether JS runtime is needed
     pub needs_js_runtime: bool,
+    /// Whether perry/ui module is imported (needs UI library linking)
+    pub needs_ui: bool,
     /// Project root (where we start looking for node_modules)
     pub project_root: PathBuf,
 }
@@ -72,6 +74,7 @@ impl CompilationContext {
             js_modules: HashMap::new(),
             import_map: HashMap::new(),
             needs_js_runtime: false,
+            needs_ui: false,
             project_root,
         }
     }
@@ -131,6 +134,27 @@ fn find_jsruntime_library() -> Option<PathBuf> {
             .and_then(|p| p.parent().map(|p| p.join("libperry_jsruntime.a")))
             .unwrap_or_default(),
         PathBuf::from("/usr/local/lib/libperry_jsruntime.a"),
+    ];
+
+    for path in &candidates {
+        if path.exists() {
+            return Some(path.clone());
+        }
+    }
+
+    None
+}
+
+/// Find the UI library for linking (optional - only needed when perry/ui is imported)
+fn find_ui_library() -> Option<PathBuf> {
+    let candidates = [
+        PathBuf::from("target/release/libperry_ui_macos.a"),
+        PathBuf::from("target/debug/libperry_ui_macos.a"),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.join("libperry_ui_macos.a")))
+            .unwrap_or_default(),
+        PathBuf::from("/usr/local/lib/libperry_ui_macos.a"),
     ];
 
     for path in &candidates {
@@ -525,6 +549,9 @@ fn collect_modules(
     for import in &mut hir_module.imports {
         if import.is_native {
             import.module_kind = ModuleKind::NativeRust;
+            if import.source == "perry/ui" {
+                ctx.needs_ui = true;
+            }
             continue;
         }
 
@@ -1105,6 +1132,27 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             cmd.arg("-lpthread")
                .arg("-ldl")
                .arg("-lstdc++");
+        }
+    }
+
+    // Link perry/ui library and platform frameworks if needed
+    if ctx.needs_ui {
+        if let Some(ui_lib) = find_ui_library() {
+            cmd.arg(&ui_lib);
+
+            #[cfg(target_os = "macos")]
+            {
+                cmd.arg("-framework").arg("AppKit");
+            }
+
+            match format {
+                OutputFormat::Text => println!("Linking perry/ui (native UI)"),
+                OutputFormat::Json => {}
+            }
+        } else {
+            return Err(anyhow!(
+                "perry/ui imported but libperry_ui_macos.a not found. Build with: cargo build --release -p perry-ui-macos"
+            ));
         }
     }
 

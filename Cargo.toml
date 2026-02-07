@@ -11,6 +11,8 @@ members = [
     "crates/perry-jsruntime",
     "crates/perry-stdlib",
     "crates/perry-diagnostics",
+    "crates/perry-ui",
+    "crates/perry-ui-macos",
 ]
 
 # Aggressive release optimizations for small, fast binaries
@@ -32,7 +34,7 @@ opt-level = "s"       # Optimize for size in stdlib
 opt-level = 3
 
 [workspace.package]
-version = "0.2.115"
+version = "0.2.117"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/skelpo/perry"
