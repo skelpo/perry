@@ -126,6 +126,29 @@ fn entry_matches(entry: &Entry, fp: u64, pattern: &str, flags: &str) -> bool {
     entry.fp == fp && &*entry.flags == flags && &*entry.pattern == pattern
 }
 
+/// Pick one of this fingerprint's two ways without displacing a recorded
+/// literal site. If both are literal-owned, the caller leaves the new dynamic
+/// entry uncached; a new literal pins its bundle in the bounded site table.
+fn replacement_slot(cache: &[Option<Entry>], slot: usize, fp: u64) -> Option<usize> {
+    if cache[slot].is_none() {
+        return Some(slot);
+    }
+    if cache[slot ^ 1].is_none() {
+        return Some(slot ^ 1);
+    }
+    let preferred = slot ^ ((fp >> 11) as usize & 1);
+    [preferred, preferred ^ 1].into_iter().find(|&candidate| {
+        let entry = cache[candidate].as_ref().expect("both ways are occupied");
+        !super::site_key::references_content(&entry.pattern, &entry.flags)
+    })
+}
+
+fn note_eviction() {
+    if crate::hot_diag::regex_on() {
+        crate::hot_diag::regex_counters(|d| d.cache_evictions += 1);
+    }
+}
+
 /// Find the verified entry for `(pattern, canonical flags)`.
 pub(super) fn lookup(pattern: &str, flags: &str) -> Option<Hit> {
     if !enabled() {
@@ -184,21 +207,19 @@ pub(super) fn insert(pattern: &str, flags: &str) -> (Arc<str>, Arc<str>) {
                 }
             }
         }
-        let victim = if cache[slot].is_none() {
-            slot
-        } else if cache[slot ^ 1].is_none() {
-            slot ^ 1
-        } else {
-            slot ^ ((fp >> 11) as usize & 1)
-        };
         let pattern: Arc<str> = Arc::from(pattern);
         let flags: Arc<str> = Arc::from(flags);
-        cache[victim] = Some(Entry {
-            fp,
-            pattern: pattern.clone(),
-            flags: flags.clone(),
-            programs: None,
-        });
+        if let Some(victim) = replacement_slot(&cache, slot, fp) {
+            if cache[victim].is_some() {
+                note_eviction();
+            }
+            cache[victim] = Some(Entry {
+                fp,
+                pattern: pattern.clone(),
+                flags: flags.clone(),
+                programs: None,
+            });
+        }
         (pattern, flags)
     })
 }
@@ -212,7 +233,7 @@ pub(super) fn install_programs(pattern: &str, flags: &str, programs: Arc<Program
     }
     let fp = fingerprint(pattern.as_bytes(), flags.as_bytes());
     let slot = slot_of(fp);
-    SITE_CACHE.with(|cache| {
+    let content_owned = SITE_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if cache.is_empty() {
             cache.resize_with(SLOTS, || None);
@@ -221,26 +242,27 @@ pub(super) fn install_programs(pattern: &str, flags: &str, programs: Arc<Program
             if let Some(entry) = &mut cache[s] {
                 if entry_matches(entry, fp, pattern, flags) {
                     if entry.programs.is_none() {
-                        entry.programs = Some(programs);
+                        entry.programs = Some(programs.clone());
                     }
-                    return;
+                    return true;
                 }
             }
         }
-        let victim = if cache[slot].is_none() {
-            slot
-        } else if cache[slot ^ 1].is_none() {
-            slot ^ 1
-        } else {
-            slot ^ ((fp >> 11) as usize & 1)
+        let Some(victim) = replacement_slot(&cache, slot, fp) else {
+            return false;
         };
+        if cache[victim].is_some() {
+            note_eviction();
+        }
         cache[victim] = Some(Entry {
             fp,
             pattern: Arc::from(pattern),
             flags: Arc::from(flags),
-            programs: Some(programs),
+            programs: Some(programs.clone()),
         });
+        true
     });
+    super::site_key::install_programs_for_content(pattern, flags, &programs, content_owned);
 }
 
 #[cfg(test)]
@@ -266,4 +288,10 @@ pub(super) fn test_has_programs(pattern: &str, flags: &str) -> Option<bool> {
         }
         None
     })
+}
+
+#[cfg(test)]
+pub(super) fn test_slot_and_victim_way(pattern: &str, flags: &str) -> (usize, usize) {
+    let fp = fingerprint(pattern.as_bytes(), flags.as_bytes());
+    (slot_of(fp), (fp >> 11) as usize & 1)
 }

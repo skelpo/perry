@@ -50,8 +50,8 @@ use std::sync::{Arc, Weak};
 
 use super::site_cache::Programs;
 
-/// The site entry's view of a pattern's compiled programs: **weak**, so the
-/// table can hand them out but can never be the reason they stay alive.
+/// The ordinary site entry's view of a pattern's compiled programs: **weak**,
+/// because the pinned content-cache entry owns the bundle.
 ///
 /// Measured cost of holding them strongly (cc, one 3300-char reply): settled
 /// footprint 478/474 MB → 500/527 MB and idle CPU 2.37 → 2.68 s. The site
@@ -60,11 +60,10 @@ use super::site_cache::Programs;
 /// wants. The campaign's directive is both metrics together, and a CPU win
 /// bought with resident memory does not land.
 ///
-/// Strong references remain where they belong: the `(pattern, flags)` program
-/// caches, and every live header that installed them via `Arc::into_raw`. A
-/// site entry whose programs have been dropped simply reports "not built
-/// yet", and the next construction re-picks them up from the content cache —
-/// the same path the site's very first construction takes.
+/// Strong references remain where they belong: the content cache and every
+/// live header that installed them via `Arc::into_raw`. Only the collision
+/// fallback below pins directly, and its bounded site entry drops the pin when
+/// that site is displaced.
 struct WeakPrograms(Weak<Programs>);
 
 impl WeakPrograms {
@@ -79,6 +78,28 @@ impl WeakPrograms {
     /// One weak pointer to the bundle makes partial upgrade unrepresentable.
     fn upgrade(&self) -> Option<Arc<Programs>> {
         self.0.upgrade()
+    }
+}
+
+/// Normally the content cache owns the program bundle and a literal site only
+/// observes it weakly. If both content-cache ways are occupied by other live
+/// literal sites, the new site's bundle lives here instead. The site table is
+/// bounded, and replacing the site drops this last-resort pin.
+enum SitePrograms {
+    Cached(WeakPrograms),
+    Pinned(Arc<Programs>),
+}
+
+impl SitePrograms {
+    fn cached(programs: &Arc<Programs>) -> Self {
+        Self::Cached(WeakPrograms::downgrade(programs))
+    }
+
+    fn upgrade(&self) -> Option<Arc<Programs>> {
+        match self {
+            Self::Cached(programs) => programs.upgrade(),
+            Self::Pinned(programs) => Some(programs.clone()),
+        }
     }
 }
 
@@ -111,7 +132,7 @@ struct Entry {
     /// of the site: the author wrote `/x/gi` or `/x/ig` once.
     flags_are_canonical: bool,
     bits: FlagBits,
-    programs: Option<WeakPrograms>,
+    programs: Option<SitePrograms>,
 }
 
 /// What a construction gets back on a site hit.
@@ -168,7 +189,7 @@ pub(super) fn lookup(key: usize, raw_flags: &str) -> Option<SiteHit> {
                         flags: entry.flags.clone(),
                         flags_are_canonical: entry.flags_are_canonical,
                         bits: entry.bits,
-                        programs: entry.programs.as_ref().and_then(WeakPrograms::upgrade),
+                        programs: entry.programs.as_ref().and_then(SitePrograms::upgrade),
                     });
                 }
             }
@@ -209,10 +230,10 @@ pub(super) fn record(
                         if entry
                             .programs
                             .as_ref()
-                            .and_then(WeakPrograms::upgrade)
+                            .and_then(SitePrograms::upgrade)
                             .is_none()
                         {
-                            entry.programs = Some(WeakPrograms::downgrade(programs));
+                            entry.programs = Some(SitePrograms::cached(programs));
                         }
                     }
                     return;
@@ -236,7 +257,7 @@ pub(super) fn record(
             flags,
             flags_are_canonical,
             bits,
-            programs: programs.as_ref().map(WeakPrograms::downgrade),
+            programs: programs.as_ref().map(SitePrograms::cached),
         });
     });
 }
@@ -259,12 +280,46 @@ pub(super) fn install_programs(key: usize, programs: Arc<Programs>) {
                     && entry
                         .programs
                         .as_ref()
-                        .and_then(WeakPrograms::upgrade)
+                        .and_then(SitePrograms::upgrade)
                         .is_none()
                 {
-                    entry.programs = Some(WeakPrograms::downgrade(&programs));
+                    entry.programs = Some(SitePrograms::cached(&programs));
                     return;
                 }
+            }
+        }
+    });
+}
+
+/// Whether the bounded literal-site table still records this content. The
+/// content cache consults this only on a collision miss, never on a site hit.
+pub(super) fn references_content(pattern: &str, flags: &str) -> bool {
+    SITE_KEY_TABLE.with(|table| {
+        table
+            .borrow()
+            .iter()
+            .flatten()
+            .any(|entry| &*entry.pattern == pattern && &*entry.flags == flags)
+    })
+}
+
+/// Publish a freshly built bundle to every literal site for this content.
+/// `content_owned` keeps the ordinary weak ownership. A bundle that could not
+/// enter the content table is pinned by its bounded site entry instead.
+pub(super) fn install_programs_for_content(
+    pattern: &str,
+    flags: &str,
+    programs: &Arc<Programs>,
+    content_owned: bool,
+) {
+    SITE_KEY_TABLE.with(|table| {
+        for entry in table.borrow_mut().iter_mut().flatten() {
+            if &*entry.pattern == pattern && &*entry.flags == flags {
+                entry.programs = Some(if content_owned {
+                    SitePrograms::cached(programs)
+                } else {
+                    SitePrograms::Pinned(programs.clone())
+                });
             }
         }
     });
